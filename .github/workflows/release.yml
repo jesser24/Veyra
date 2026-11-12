@@ -1,0 +1,70 @@
+name: Release
+
+# Run by pushing a tag such as v0.1.0. A release is created ONLY if every platform built and every installer passed verification.
+on:
+  push: { tags: ["v*"] }
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2022, platform: windows, bundles: nsis }
+          - { label: macos-arm64, os: macos-15, platform: macos, bundles: "app,dmg" }
+          - { label: macos-x64, os: macos-15-intel, platform: macos, bundles: "app,dmg" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+        shell: bash
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "Tag ${GITHUB_REF_NAME} does not match version v$V in tauri.conf.json"; exit 1; }
+      - name: Build
+        shell: bash
+        env:
+          # Optional. Without these secrets the macOS build is UNSIGNED (see docs/BUILD.md).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mkdir -p logs; set -o pipefail
+          npx tauri build --ci --bundles ${{ matrix.bundles }} 2>&1 | tee logs/tauri-build-${{ matrix.label }}.log
+      - run: node scripts/verify-artifacts.mjs ${{ matrix.platform }} ${{ matrix.label }} release-out
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with: { name: "veyra-${{ matrix.label }}", path: release-out/, if-no-files-found: error }
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: assets, pattern: "veyra-*", merge-multiple: true }
+      - name: List and re-verify checksums
+        run: |
+          cd assets && ls -l && cat SHA256SUMS-*.txt > SHA256SUMS.txt
+          sha256sum --check --ignore-missing SHA256SUMS.txt
+      - name: Create release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "${GITHUB_REF_NAME}" assets/* --repo "${GITHUB_REPOSITORY}" --title "Veyra ${GITHUB_REF_NAME}" --generate-notes --draft

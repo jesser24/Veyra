@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.97.0"
+  NODE_VERSION: "22"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  web:
+    name: Front-end (typecheck, tests, build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  core:
+    name: Rust core (fmt-free tests, Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p veyra-core --locked
+
+  bundle:
+    name: Bundle ${{ matrix.label }}
+    needs: [web, core]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2022, platform: windows, bundles: nsis, target: "" }
+          - { label: macos-arm64, os: macos-15, platform: macos, bundles: "app,dmg", target: "" }
+          - { label: macos-x64, os: macos-15-intel, platform: macos, bundles: "app,dmg", target: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain versions
+        shell: bash
+        run: |
+          rustc --version; cargo --version; node --version; npm --version
+      - run: npm ci
+        shell: bash
+      - name: Build (logs kept)
+        shell: bash
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          npx tauri build --ci --bundles ${{ matrix.bundles }} 2>&1 | tee logs/tauri-build-${{ matrix.label }}.log
+      - name: Verify installers exist (fails the job otherwise)
+        shell: bash
+        run: node scripts/verify-artifacts.mjs ${{ matrix.platform }} ${{ matrix.label }} release-out
+      - uses: actions/upload-artifact@v4
+        with: { name: "veyra-${{ matrix.label }}", path: release-out/, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "logs-${{ matrix.label }}", path: logs/, if-no-files-found: warn }
