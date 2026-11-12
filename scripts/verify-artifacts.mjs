@@ -2,7 +2,7 @@
 // Usage: node scripts/verify-artifacts.mjs <windows|macos> <label> [outDir]
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 
 const [platform, label, out = "release-out"] = process.argv.slice(2);
 const root = "target/release/bundle";
@@ -34,7 +34,7 @@ if (failed) process.exit(1);
 mkdirSync(out, { recursive: true });
 const sums = [];
 for (const p of found) {
-  const name = p.split("/").pop();
+  const name = basename(p);
   copyFileSync(p, join(out, name));
   sums.push(`${createHash("sha256").update(readFileSync(p)).digest("hex")}  ${name}`);
 }
