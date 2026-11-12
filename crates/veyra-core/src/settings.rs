@@ -9,7 +9,7 @@ pub enum Theme { System, Light, Dark }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Shape { Circle, Squircle, Pill }
+pub enum Shape { Tab, #[serde(alias = "circle")] Pill, #[serde(alias = "squircle")] Rounded }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -18,19 +18,20 @@ pub enum SecondClick { Hide, Collapse }
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct ToggleSettings {
-    pub size: f64, pub opacity: f64, pub margin: f64, pub snap_threshold: f64,
+    pub thickness: f64, pub length: f64, pub opacity: f64, pub margin: f64, pub snap_threshold: f64,
     pub shape: Shape, pub accent: String, pub shadow: bool, pub reflection: bool, pub animations: bool,
     pub always_on_top: bool, pub second_click: SecondClick,
 }
 impl Default for ToggleSettings {
-    fn default() -> Self { Self { size: 52.0, opacity: 0.92, margin: 12.0, snap_threshold: 40.0, shape: Shape::Circle,
+    fn default() -> Self { Self { thickness: 10.0, length: 72.0, opacity: 0.75, margin: 12.0, snap_threshold: 40.0, shape: Shape::Tab,
         accent: "#6f7de0".into(), shadow: true, reflection: true, animations: true, always_on_top: true, second_click: SecondClick::Hide } }
 }
 impl ToggleSettings {
     pub fn clamped(mut self) -> Self {
         let f = |v: f64, lo: f64, hi: f64, d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
-        self.size = f(self.size, 28.0, 120.0, 52.0);
-        self.opacity = f(self.opacity, 0.15, 1.0, 0.92); // never fully invisible: the hit area must stay usable
+        self.thickness = f(self.thickness, 6.0, 20.0, 10.0);
+        self.length = f(self.length, 40.0, 200.0, 72.0);
+        self.opacity = f(self.opacity, 0.15, 1.0, 0.75); // never fully invisible: the hit area must stay usable
         self.margin = f(self.margin, 0.0, 96.0, 12.0);
         self.snap_threshold = f(self.snap_threshold, 0.0, 120.0, 40.0);
         let hex = self.accent.len() == 7 && self.accent.starts_with('#') && self.accent[1..].chars().all(|c| c.is_ascii_hexdigit());
@@ -84,15 +85,20 @@ mod tests {
         let s = Settings::default(); assert!(!s.autostart); assert!(s.toggle.opacity >= 0.15);
     }
     #[test] fn values_are_clamped_and_garbage_is_replaced() {
-        let t = ToggleSettings { size: 9999.0, opacity: 0.0, margin: -4.0, accent: "red".into(), ..Default::default() }.clamped();
-        assert_eq!((t.size, t.opacity, t.margin), (120.0, 0.15, 0.0)); assert_eq!(t.accent, "#6f7de0");
+        let t = ToggleSettings { thickness: 9999.0, opacity: 0.0, margin: -4.0, accent: "red".into(), ..Default::default() }.clamped();
+        assert_eq!((t.thickness, t.opacity, t.margin), (20.0, 0.15, 0.0)); assert_eq!(t.accent, "#6f7de0");
     }
     #[test] fn roundtrip_and_old_files_without_new_keys() {
         let d = dir(); let p = d.join("settings.json");
-        let mut s = Settings::default(); s.toggle.size = 64.0; s.save(&p).unwrap();
-        assert_eq!(Settings::load(&p).toggle.size, 64.0);
+        let mut s = Settings::default(); s.toggle.length = 90.0; s.save(&p).unwrap();
+        assert_eq!(Settings::load(&p).toggle.length, 90.0);
         fs::write(&p, r#"{"theme":"dark"}"#).unwrap();
         let o = Settings::load(&p); assert_eq!(o.theme, Theme::Dark); assert_eq!(o.toggle, ToggleSettings::default());
+    }
+    #[test] fn default_opacity_is_75_percent_and_old_circle_shape_still_loads() {
+        assert_eq!(ToggleSettings::default().opacity, 0.75);
+        let o: Settings = serde_json::from_str(r#"{"toggle":{"shape":"circle","size":52}}"#).unwrap();
+        assert_eq!(o.toggle.shape, Shape::Pill);
     }
     #[test] fn corrupt_file_is_set_aside_not_destroyed() {
         let d = dir(); let p = d.join("settings.json"); fs::write(&p, "{ not json").unwrap();

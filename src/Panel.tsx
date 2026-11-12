@@ -17,7 +17,7 @@ export function Panel() {
   if (!s) return null;
   const push = (n: Settings) => api.updateSettings(n).then(() => setErr(null)).catch((e) => setErr(String(e)));
   const setT = (p: Partial<ToggleSettings>) => push({ ...s, toggle: { ...s.toggle, ...p } });
-  const num = (k: "size" | "opacity" | "margin" | "snap_threshold", min: number, max: number, step: number, fmt: (v: number) => string) => (
+  const num = (k: "thickness" | "length" | "opacity" | "margin" | "snap_threshold", min: number, max: number, step: number, fmt: (v: number) => string) => (
     <span className="ctl"><input type="range" min={min} max={max} step={step} value={s.toggle[k]} onChange={(e) => setT({ [k]: clamp(Number(e.target.value), min, max) })} /><output>{fmt(s.toggle[k])}</output></span>
   );
   return (
@@ -34,11 +34,12 @@ export function Panel() {
             <b>Local AI chat is not installed yet.</b> The conversation window, the model manager (llama.cpp + Qwen3) and the encrypted history are the next development phases. Below are the settings that already work.
           </section>
           <h2>Toggle</h2>
-          <Row label="Size">{num("size", 28, 120, 1, (v) => `${v} px`)}</Row>
+          <Row label="Tab thickness">{num("thickness", 6, 20, 1, (v) => `${v} px`)}</Row>
+          <Row label="Tab length">{num("length", 40, 200, 1, (v) => `${v} px`)}</Row>
           <Row label="Opacity" hint="never fully invisible">{num("opacity", 0.15, 1, 0.01, (v) => `${Math.round(v * 100)} %`)}</Row>
           <Row label="Screen margin">{num("margin", 0, 96, 1, (v) => `${v} px`)}</Row>
           <Row label="Snap distance" hint="edges and corners">{num("snap_threshold", 0, 120, 1, (v) => `${v} px`)}</Row>
-          <Row label="Shape"><select value={s.toggle.shape} onChange={(e) => setT({ shape: e.target.value as Shape })}><option value="circle">Circle</option><option value="squircle">Rounded square</option><option value="pill">Pill</option></select></Row>
+          <Row label="Shape"><select value={s.toggle.shape} onChange={(e) => setT({ shape: e.target.value as Shape })}><option value="tab">Edge tab</option><option value="rounded">Rounded</option><option value="pill">Pill</option></select></Row>
           <Row label="Accent colour"><input type="color" value={s.toggle.accent} onChange={(e) => setT({ accent: e.target.value })} /></Row>
           <Row label="Shadow"><input type="checkbox" checked={s.toggle.shadow} onChange={(e) => setT({ shadow: e.target.checked })} /></Row>
           <Row label="Reflection"><input type="checkbox" checked={s.toggle.reflection} onChange={(e) => setT({ reflection: e.target.checked })} /></Row>

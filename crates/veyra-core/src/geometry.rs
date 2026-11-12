@@ -1,4 +1,5 @@
-//! Toggle placement in physical pixels: free position, snapping to edges and corners, margins, multi-monitor.
+//! Toggle placement in physical pixels. The toggle is an edge tab (like a drawer handle): it docks to one of the four
+//! edges or four corners, or floats freely as a small pill. Pure functions, unit-tested on any OS.
 use serde::{Deserialize, Serialize};
 
 /// A monitor's work area (taskbar/menu bar excluded) in physical pixels on the virtual desktop.
@@ -17,8 +18,19 @@ pub enum Corner { TopLeft, TopRight, BottomLeft, BottomRight }
 #[serde(tag = "kind", content = "at", rename_all = "snake_case")]
 pub enum Snap { Free, Edge(Side), Corner(Corner) }
 
-/// Where the toggle lives. `fx`/`fy` are 0..1 positions inside the free travel range of the monitor
-/// (work area minus toggle size minus margins), so they survive resolution and DPI changes.
+impl Snap {
+    /// Edge the tab is attached to (a corner uses the vertical edge of its column). `None` when floating.
+    pub fn side(self) -> Option<Side> {
+        match self {
+            Snap::Free => None,
+            Snap::Edge(s) => Some(s),
+            Snap::Corner(Corner::TopLeft | Corner::BottomLeft) => Some(Side::Left),
+            Snap::Corner(Corner::TopRight | Corner::BottomRight) => Some(Side::Right),
+        }
+    }
+}
+
+/// `fx`/`fy` are the centre of the window as fractions of the monitor work area, so a placement survives resolution and DPI changes.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Placement { pub monitor: String, pub fx: f64, pub fy: f64, pub snap: Snap }
 
@@ -26,31 +38,47 @@ impl Default for Placement {
     fn default() -> Self { Placement { monitor: String::new(), fx: 1.0, fy: 0.5, snap: Snap::Edge(Side::Right) } }
 }
 
+/// Window size in logical pixels: `thickness` is perpendicular to the edge (visible tab + extra hit area), `length` along it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dims { pub thickness: f64, pub length: f64 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PRect { pub x: i32, pub y: i32, pub w: i32, pub h: i32 }
 
 fn unit(v: f64) -> f64 { if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 } }
 fn px(dip: f64, scale: f64) -> i32 { (dip * scale).round() as i32 }
 
-/// Window rectangle of the toggle for a placement. `size_dip` and `margin_dip` are logical pixels.
-/// A negative margin is allowed: the transparent halo around the visible toggle may extend past the work area.
-pub fn toggle_rect(p: &Placement, size_dip: f64, margin_dip: f64, m: &MonitorInfo) -> PRect {
-    let size = px(size_dip, m.scale).clamp(1, m.w.min(m.h).max(1));
-    let margin = px(margin_dip, m.scale);
-    let free_w = (m.w - size - 2 * margin).max(0) as f64;
-    let free_h = (m.h - size - 2 * margin).max(0) as f64;
-    let (fx, fy) = match p.snap {
-        Snap::Free => (unit(p.fx), unit(p.fy)),
-        Snap::Edge(Side::Left) => (0.0, unit(p.fy)),
-        Snap::Edge(Side::Right) => (1.0, unit(p.fy)),
-        Snap::Edge(Side::Top) => (unit(p.fx), 0.0),
-        Snap::Edge(Side::Bottom) => (unit(p.fx), 1.0),
-        Snap::Corner(Corner::TopLeft) => (0.0, 0.0),
-        Snap::Corner(Corner::TopRight) => (1.0, 0.0),
-        Snap::Corner(Corner::BottomLeft) => (0.0, 1.0),
-        Snap::Corner(Corner::BottomRight) => (1.0, 1.0),
+/// Physical window size for a snap state.
+pub fn window_px(snap: Snap, d: Dims, m: &MonitorInfo) -> (i32, i32) {
+    let (t, l) = (px(d.thickness, m.scale).max(1), px(d.length, m.scale).max(1));
+    let vertical = matches!(snap.side(), Some(Side::Left | Side::Right));
+    let (w, h) = if vertical { (t, l) } else { (l, t) };
+    (w.min(m.w.max(1)), h.min(m.h.max(1)))
+}
+
+fn clamp_i(v: i32, lo: i32, hi: i32) -> i32 { if hi < lo { lo } else { v.clamp(lo, hi) } }
+
+/// Window rectangle for a placement. `margin_dip` is the gap kept along the edge (from corners) and around a floating toggle.
+pub fn toggle_rect(p: &Placement, d: Dims, margin_dip: f64, m: &MonitorInfo) -> PRect {
+    let (w, h) = window_px(p.snap, d, m);
+    let mg = px(margin_dip, m.scale).max(0);
+    let cx = m.x as f64 + unit(p.fx) * m.w as f64;
+    let cy = m.y as f64 + unit(p.fy) * m.h as f64;
+    let fx = clamp_i((cx - w as f64 / 2.0).round() as i32, m.x + mg, m.x + m.w - w - mg);
+    let fy = clamp_i((cy - h as f64 / 2.0).round() as i32, m.y + mg, m.y + m.h - h - mg);
+    let (left, right, top, bottom) = (m.x, m.x + m.w - w, m.y + mg, m.y + m.h - h - mg);
+    let (x, y) = match p.snap {
+        Snap::Free => (fx, fy),
+        Snap::Edge(Side::Left) => (left, fy),
+        Snap::Edge(Side::Right) => (right, fy),
+        Snap::Edge(Side::Top) => (fx, m.y),
+        Snap::Edge(Side::Bottom) => (fx, m.y + m.h - h),
+        Snap::Corner(Corner::TopLeft) => (left, top),
+        Snap::Corner(Corner::TopRight) => (right, top),
+        Snap::Corner(Corner::BottomLeft) => (left, bottom),
+        Snap::Corner(Corner::BottomRight) => (right, bottom),
     };
-    PRect { x: m.x + margin + (fx * free_w).round() as i32, y: m.y + margin + (fy * free_h).round() as i32, w: size, h: size }
+    PRect { x, y, w, h }
 }
 
 /// Monitor containing the point, else the nearest one. `None` only when there are no monitors.
@@ -63,35 +91,36 @@ pub fn monitor_for_point(x: i32, y: i32, monitors: &[MonitorInfo]) -> Option<&Mo
     monitors.iter().min_by_key(|m| dist(m))
 }
 
-/// Turn the rectangle where the user dropped the toggle into a placement, snapping to an edge or a corner
-/// when it ends within `threshold_dip` of the (margin-inset) border. Snap distances are measured on the window rectangle.
-pub fn placement_from_rect(r: PRect, size_dip: f64, margin_dip: f64, threshold_dip: f64, monitors: &[MonitorInfo]) -> Option<Placement> {
-    let m = monitor_for_point(r.x + r.w / 2, r.y + r.h / 2, monitors)?;
-    let margin = px(margin_dip, m.scale);
+/// Turn the rectangle where the user released the toggle into a placement: within `threshold_dip` of a border it docks to
+/// that edge, and also within it of a corner (measured along the edge, after the margin) it docks to the corner.
+pub fn placement_from_rect(r: PRect, margin_dip: f64, threshold_dip: f64, monitors: &[MonitorInfo]) -> Option<Placement> {
+    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+    let m = monitor_for_point(cx, cy, monitors)?;
+    let mg = px(margin_dip, m.scale).max(0);
     let th = px(threshold_dip, m.scale).max(0);
-    let size = px(size_dip, m.scale).clamp(1, m.w.min(m.h).max(1));
-    let free_w = (m.w - size - 2 * margin).max(0);
-    let free_h = (m.h - size - 2 * margin).max(0);
-    let rel_x = (r.x - m.x - margin).clamp(0, free_w);
-    let rel_y = (r.y - m.y - margin).clamp(0, free_h);
-    let fx = if free_w == 0 { 0.5 } else { rel_x as f64 / free_w as f64 };
-    let fy = if free_h == 0 { 0.5 } else { rel_y as f64 / free_h as f64 };
-    let (l, rt, t, b) = (rel_x <= th, free_w - rel_x <= th, rel_y <= th, free_h - rel_y <= th);
-    let snap = match (l, rt, t, b) {
-        (true, _, true, _) => Snap::Corner(Corner::TopLeft),
-        (_, true, true, _) => Snap::Corner(Corner::TopRight),
-        (true, _, _, true) => Snap::Corner(Corner::BottomLeft),
-        (_, true, _, true) => Snap::Corner(Corner::BottomRight),
-        (true, ..) => Snap::Edge(Side::Left),
-        (_, true, ..) => Snap::Edge(Side::Right),
-        (_, _, true, _) => Snap::Edge(Side::Top),
-        (_, _, _, true) => Snap::Edge(Side::Bottom),
-        _ => Snap::Free,
+    let d = [(Side::Left, r.x - m.x), (Side::Right, m.x + m.w - (r.x + r.w)), (Side::Top, r.y - m.y), (Side::Bottom, m.y + m.h - (r.y + r.h))];
+    let nearest = d.iter().filter(|(_, v)| *v <= th).min_by_key(|(_, v)| *v).map(|(s, _)| *s);
+    let (to_l, to_r) = (r.x - m.x - mg, m.x + m.w - (r.x + r.w) - mg);
+    let (to_t, to_b) = (r.y - m.y - mg, m.y + m.h - (r.y + r.h) - mg);
+    let snap = match nearest {
+        None => Snap::Free,
+        Some(Side::Left | Side::Right) => {
+            let right = nearest == Some(Side::Right);
+            if to_t <= th { Snap::Corner(if right { Corner::TopRight } else { Corner::TopLeft }) }
+            else if to_b <= th { Snap::Corner(if right { Corner::BottomRight } else { Corner::BottomLeft }) }
+            else { Snap::Edge(if right { Side::Right } else { Side::Left }) }
+        }
+        Some(Side::Top | Side::Bottom) => {
+            let bottom = nearest == Some(Side::Bottom);
+            if to_l <= th { Snap::Corner(if bottom { Corner::BottomLeft } else { Corner::TopLeft }) }
+            else if to_r <= th { Snap::Corner(if bottom { Corner::BottomRight } else { Corner::TopRight }) }
+            else { Snap::Edge(if bottom { Side::Bottom } else { Side::Top }) }
+        }
     };
-    Some(Placement { monitor: m.id.clone(), fx: unit(fx), fy: unit(fy), snap })
+    Some(Placement { monitor: m.id.clone(), fx: unit((cx - m.x) as f64 / m.w.max(1) as f64), fy: unit((cy - m.y) as f64 / m.h.max(1) as f64), snap })
 }
 
-/// Re-home a saved placement after monitors changed. Never leaves the toggle off-screen; the saved choice is not overwritten by the caller.
+/// Re-home a saved placement after monitors changed. Never leaves the toggle off-screen; the caller keeps the saved choice.
 pub fn resolve_placement(saved: &Placement, monitors: &[MonitorInfo]) -> Option<(Placement, MonitorInfo)> {
     let m = monitors.iter().find(|m| m.id == saved.monitor).or_else(|| monitors.first())?;
     Some((Placement { monitor: m.id.clone(), ..saved.clone() }, m.clone()))
@@ -107,12 +136,13 @@ pub fn panel_rect(toggle: PRect, panel_w_dip: f64, panel_h_dip: f64, gap_dip: f6
     let on_top = cy < m.y + m.h / 2;
     let x = if on_left { toggle.x + toggle.w + gap } else { toggle.x - gap - w };
     let y = if on_top { toggle.y } else { toggle.y + toggle.h - h };
-    PRect { x: x.clamp(m.x, (m.x + m.w - w).max(m.x)), y: y.clamp(m.y, (m.y + m.h - h).max(m.y)), w, h }
+    PRect { x: clamp_i(x, m.x, m.x + m.w - w), y: clamp_i(y, m.y, m.y + m.h - h), w, h }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const D: Dims = Dims { thickness: 24.0, length: 72.0 };
     fn mon(id: &str, x: i32, y: i32, w: i32, h: i32, s: f64) -> MonitorInfo { MonitorInfo { id: id.into(), x, y, w, h, scale: s } }
     fn setups() -> Vec<Vec<MonitorInfo>> { vec![
         vec![mon("A", 0, 0, 1366, 728, 1.0)], vec![mon("A", 0, 0, 1920, 1040, 1.25)], vec![mon("A", 0, 0, 3840, 2120, 2.5)],
@@ -120,67 +150,80 @@ mod tests {
         vec![mon("P", 0, 0, 1920, 1040, 1.0), mon("S", 0, -2160, 3840, 2120, 2.5)],
     ]}
     fn inside(r: &PRect, m: &MonitorInfo) -> bool { r.x >= m.x && r.y >= m.y && r.x + r.w <= m.x + m.w && r.y + r.h <= m.y + m.h }
+    fn all_snaps() -> Vec<Snap> { vec![Snap::Free, Snap::Edge(Side::Left), Snap::Edge(Side::Right), Snap::Edge(Side::Top), Snap::Edge(Side::Bottom),
+        Snap::Corner(Corner::TopLeft), Snap::Corner(Corner::TopRight), Snap::Corner(Corner::BottomLeft), Snap::Corner(Corner::BottomRight)] }
 
     #[test] fn every_placement_stays_inside_its_monitor() {
-        let snaps = [Snap::Free, Snap::Edge(Side::Left), Snap::Edge(Side::Right), Snap::Edge(Side::Top), Snap::Edge(Side::Bottom),
-            Snap::Corner(Corner::TopLeft), Snap::Corner(Corner::TopRight), Snap::Corner(Corner::BottomLeft), Snap::Corner(Corner::BottomRight)];
-        for set in setups() { for m in &set { for snap in snaps { for f in [-3.0, 0.0, 0.3, 1.0, 9.0, f64::NAN] { for (size, margin) in [(52.0, 12.0), (96.0, 64.0), (24.0, 0.0)] {
-            let r = toggle_rect(&Placement { monitor: m.id.clone(), fx: f, fy: f, snap }, size, margin, m);
-            assert!(inside(&r, m), "{snap:?} {f} {size} {margin}: {r:?} not in {m:?}");
+        for set in setups() { for m in &set { for snap in all_snaps() { for f in [-3.0, 0.0, 0.3, 1.0, 9.0, f64::NAN] { for margin in [0.0, 12.0, 96.0] {
+            let r = toggle_rect(&Placement { monitor: m.id.clone(), fx: f, fy: f, snap }, D, margin, m);
+            assert!(inside(&r, m), "{snap:?} {f} {margin}: {r:?} not in {m:?}");
         }}}}}
     }
-    #[test] fn margin_is_respected_on_edges_and_corners() {
+    #[test] fn edge_tabs_are_flush_with_the_screen_edge_and_oriented() {
         let m = mon("A", 100, 50, 1920, 1040, 1.0);
-        let r = toggle_rect(&Placement { monitor: "A".into(), fx: 0.0, fy: 0.0, snap: Snap::Corner(Corner::TopLeft) }, 50.0, 20.0, &m);
-        assert_eq!((r.x, r.y), (120, 70));
-        let r = toggle_rect(&Placement { monitor: "A".into(), fx: 0.0, fy: 0.5, snap: Snap::Edge(Side::Right) }, 50.0, 20.0, &m);
-        assert_eq!(r.x + r.w, m.x + m.w - 20);
+        let p = |snap| Placement { monitor: "A".into(), fx: 0.5, fy: 0.5, snap };
+        let r = toggle_rect(&p(Snap::Edge(Side::Right)), D, 12.0, &m); assert_eq!(r.x + r.w, m.x + m.w); assert_eq!((r.w, r.h), (24, 72));
+        let r = toggle_rect(&p(Snap::Edge(Side::Left)), D, 12.0, &m); assert_eq!(r.x, m.x);
+        let r = toggle_rect(&p(Snap::Edge(Side::Top)), D, 12.0, &m); assert_eq!(r.y, m.y); assert_eq!((r.w, r.h), (72, 24));
+        let r = toggle_rect(&p(Snap::Edge(Side::Bottom)), D, 12.0, &m); assert_eq!(r.y + r.h, m.y + m.h);
     }
-    #[test] fn drop_near_border_snaps_to_edge_and_corner_else_stays_free() {
+    #[test] fn corners_keep_the_margin_along_the_edge() {
+        let m = mon("A", 100, 50, 1920, 1040, 1.0);
+        let p = |c| Placement { monitor: "A".into(), fx: 0.5, fy: 0.5, snap: Snap::Corner(c) };
+        let r = toggle_rect(&p(Corner::TopLeft), D, 20.0, &m); assert_eq!((r.x, r.y), (100, 70));
+        let r = toggle_rect(&p(Corner::BottomRight), D, 20.0, &m); assert_eq!((r.x + r.w, r.y + r.h), (m.x + m.w, m.y + m.h - 20));
+    }
+    #[test] fn release_snaps_to_all_four_edges_and_all_four_corners_else_free() {
         let ms = vec![mon("A", 0, 0, 1920, 1040, 1.0)];
-        let p = placement_from_rect(PRect { x: 20, y: 400, w: 52, h: 52 }, 52.0, 12.0, 40.0, &ms).unwrap();
-        assert_eq!(p.snap, Snap::Edge(Side::Left));
-        let p = placement_from_rect(PRect { x: 1860, y: 970, w: 52, h: 52 }, 52.0, 12.0, 40.0, &ms).unwrap();
-        assert_eq!(p.snap, Snap::Corner(Corner::BottomRight));
-        let p = placement_from_rect(PRect { x: 700, y: 400, w: 52, h: 52 }, 52.0, 12.0, 40.0, &ms).unwrap();
-        assert_eq!(p.snap, Snap::Free);
+        let at = |x, y, w, h| placement_from_rect(PRect { x, y, w, h }, 12.0, 40.0, &ms).unwrap().snap;
+        assert_eq!(at(10, 500, 24, 72), Snap::Edge(Side::Left));
+        assert_eq!(at(1900, 500, 24, 72), Snap::Edge(Side::Right));
+        assert_eq!(at(900, 5, 72, 24), Snap::Edge(Side::Top));
+        assert_eq!(at(900, 1010, 72, 24), Snap::Edge(Side::Bottom));
+        assert_eq!(at(5, 15, 24, 72), Snap::Corner(Corner::TopLeft));
+        assert_eq!(at(1895, 15, 24, 72), Snap::Corner(Corner::TopRight));
+        assert_eq!(at(5, 950, 24, 72), Snap::Corner(Corner::BottomLeft));
+        assert_eq!(at(1895, 950, 24, 72), Snap::Corner(Corner::BottomRight));
+        assert_eq!(at(700, 400, 72, 24), Snap::Free);
     }
-    #[test] fn snap_threshold_zero_snaps_only_when_exactly_on_the_border() {
+    #[test] fn zero_threshold_snaps_only_on_the_border() {
         let ms = vec![mon("A", 0, 0, 1000, 800, 1.0)];
-        assert_eq!(placement_from_rect(PRect { x: 12, y: 300, w: 50, h: 50 }, 50.0, 12.0, 0.0, &ms).unwrap().snap, Snap::Edge(Side::Left));
-        assert_eq!(placement_from_rect(PRect { x: 13, y: 300, w: 50, h: 50 }, 50.0, 12.0, 0.0, &ms).unwrap().snap, Snap::Free);
+        assert_eq!(placement_from_rect(PRect { x: 0, y: 300, w: 24, h: 72 }, 12.0, 0.0, &ms).unwrap().snap, Snap::Edge(Side::Left));
+        assert_eq!(placement_from_rect(PRect { x: 1, y: 300, w: 24, h: 72 }, 12.0, 0.0, &ms).unwrap().snap, Snap::Free);
     }
-    #[test] fn drop_roundtrip_is_stable() {
-        for set in setups() { for m in &set {
-            let p0 = Placement { monitor: m.id.clone(), fx: 0.37, fy: 0.61, snap: Snap::Free };
-            let r = toggle_rect(&p0, 52.0, 12.0, m);
-            let p1 = placement_from_rect(r, 52.0, 12.0, 0.0, &set).unwrap();
+    #[test] fn snapped_placement_roundtrips_through_a_rect() {
+        for set in setups() { for m in &set { for snap in all_snaps() {
+            let p0 = Placement { monitor: m.id.clone(), fx: 0.4, fy: 0.6, snap };
+            let r = toggle_rect(&p0, D, 12.0, m);
+            let p1 = placement_from_rect(r, 12.0, 8.0, &set).unwrap();
             assert_eq!(p1.monitor, m.id);
-            assert!((p1.fx - 0.37).abs() < 0.01 && (p1.fy - 0.61).abs() < 0.01, "{p1:?}");
-        }}
+            if snap != Snap::Free { assert_eq!(p1.snap.side(), snap.side(), "{snap:?} -> {:?}", p1.snap); }
+            assert!(inside(&toggle_rect(&p1, D, 12.0, m), m));
+        }}}
     }
     #[test] fn drop_picks_the_monitor_under_the_toggle() {
         let ms = setups().remove(3);
-        assert_eq!(placement_from_rect(PRect { x: -500, y: 300, w: 50, h: 50 }, 50.0, 12.0, 40.0, &ms).unwrap().monitor, "S");
-        assert_eq!(placement_from_rect(PRect { x: 800, y: 300, w: 50, h: 50 }, 50.0, 12.0, 40.0, &ms).unwrap().monitor, "P");
-        assert!(placement_from_rect(PRect { x: 0, y: 0, w: 50, h: 50 }, 50.0, 12.0, 40.0, &[]).is_none());
+        assert_eq!(placement_from_rect(PRect { x: -500, y: 300, w: 24, h: 72 }, 12.0, 40.0, &ms).unwrap().monitor, "S");
+        assert_eq!(placement_from_rect(PRect { x: 800, y: 300, w: 24, h: 72 }, 12.0, 40.0, &ms).unwrap().monitor, "P");
+        assert!(placement_from_rect(PRect { x: 0, y: 0, w: 24, h: 72 }, 12.0, 40.0, &[]).is_none());
     }
     #[test] fn unplugged_monitor_falls_back_without_going_off_screen() {
         let one = vec![mon("P", 0, 0, 1920, 1040, 1.0)];
         let saved = Placement { monitor: "GONE".into(), fx: 1.0, fy: 1.0, snap: Snap::Corner(Corner::BottomRight) };
         let (p, m) = resolve_placement(&saved, &one).unwrap();
-        assert_eq!(p.monitor, "P");
-        assert!(inside(&toggle_rect(&p, 52.0, 12.0, &m), &m));
+        assert_eq!(p.monitor, "P"); assert!(inside(&toggle_rect(&p, D, 12.0, &m), &m));
         assert!(resolve_placement(&saved, &[]).is_none());
     }
     #[test] fn panel_opens_towards_the_screen_centre_and_stays_inside() {
-        for set in setups() { for m in &set { for snap in [Snap::Corner(Corner::TopLeft), Snap::Corner(Corner::BottomRight), Snap::Edge(Side::Right), Snap::Edge(Side::Left), Snap::Free] {
-            let t = toggle_rect(&Placement { monitor: m.id.clone(), fx: 0.5, fy: 0.5, snap }, 52.0, 12.0, m);
-            let p = panel_rect(t, 420.0, 600.0, 10.0, m);
-            assert!(inside(&p, m), "{snap:?} {p:?} {m:?}");
+        for set in setups() { for m in &set { for snap in all_snaps() {
+            let t = toggle_rect(&Placement { monitor: m.id.clone(), fx: 0.5, fy: 0.5, snap }, D, 12.0, m);
+            assert!(inside(&panel_rect(t, 420.0, 620.0, 8.0, m), m), "{snap:?}");
         }}}
         let m = mon("A", 0, 0, 1920, 1040, 1.0);
-        let t = toggle_rect(&Placement { monitor: "A".into(), fx: 0.0, fy: 0.0, snap: Snap::Corner(Corner::TopLeft) }, 52.0, 12.0, &m);
-        assert!(panel_rect(t, 420.0, 600.0, 10.0, &m).x >= t.x + t.w, "opens to the right of a left-hand toggle");
+        let t = toggle_rect(&Placement { monitor: "A".into(), fx: 0.0, fy: 0.5, snap: Snap::Edge(Side::Left) }, D, 12.0, &m);
+        assert!(panel_rect(t, 420.0, 620.0, 8.0, &m).x >= t.x + t.w);
+    }
+    #[test] fn side_of_a_corner_is_its_vertical_edge() {
+        assert_eq!(Snap::Corner(Corner::BottomLeft).side(), Some(Side::Left)); assert_eq!(Snap::Free.side(), None);
     }
 }

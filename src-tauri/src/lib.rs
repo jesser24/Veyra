@@ -1,34 +1,47 @@
-//! Veyra native shell (Tauri 2): the floating toggle, the panel window and settings persistence.
+//! Veyra native shell (Tauri 2): the edge-tab toggle, the panel window and settings persistence.
 //! Pure logic (geometry, settings) lives in `veyra-core`. This file makes no network connection of any kind.
+mod selftest;
+
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
-use veyra_core::geometry::{self, MonitorInfo, PRect};
-use veyra_core::settings::{SecondClick, Settings, ToggleSettings};
+use veyra_core::geometry::{self, Dims, MonitorInfo, PRect, Side};
+use veyra_core::settings::{SecondClick, Settings};
 
-const TOGGLE: &str = "toggle";
-const PANEL: &str = "panel";
-/// Transparent halo around the visible toggle (room for the shadow), in dip.
-const HALO: f64 = 12.0;
-const COMPACT_H: f64 = 64.0;
+pub(crate) const TOGGLE: &str = "toggle";
+pub(crate) const PANEL: &str = "panel";
+/// Extra transparent hit area around the drawn tab, perpendicular to the edge (dip).
+const HIT_EXTRA: f64 = 14.0;
+pub(crate) const COMPACT_H: f64 = 64.0;
 
-struct AppState {
-    path: PathBuf,
-    settings: RwLock<Settings>,
+pub(crate) struct AppState {
+    pub(crate) path: PathBuf,
+    pub(crate) log_path: PathBuf,
+    pub(crate) settings: RwLock<Settings>,
     move_gen: AtomicU64,
     ignore_moves_until: AtomicU64,
-    panel_collapsed: AtomicBool,
+    pub(crate) panel_collapsed: AtomicBool,
     topology: Mutex<String>,
+    visual: Mutex<Option<Side>>,
 }
 type S = Arc<AppState>;
 
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
-fn state(app: &AppHandle) -> S { app.state::<S>().inner().clone() }
-fn settings(app: &AppHandle) -> Settings { state(app).settings.read().unwrap_or_else(|e| e.into_inner()).clone() }
+pub(crate) fn state(app: &AppHandle) -> S { app.state::<S>().inner().clone() }
+pub(crate) fn settings(app: &AppHandle) -> Settings { state(app).settings.read().unwrap_or_else(|e| e.into_inner()).clone() }
 
-fn monitors(app: &AppHandle) -> Vec<MonitorInfo> {
+/// Append one line to `<app data>/logs/veyra.log` (kept small). Errors writing the log are ignored on purpose.
+pub(crate) fn log(app: &AppHandle, msg: &str) {
+    let st = state(app);
+    if let Some(d) = st.log_path.parent() { let _ = std::fs::create_dir_all(d); }
+    if std::fs::metadata(&st.log_path).map(|m| m.len() > 512_000).unwrap_or(false) { let _ = std::fs::rename(&st.log_path, st.log_path.with_extension("old")); }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&st.log_path) { let _ = writeln!(f, "{} {}", now_ms(), msg); }
+}
+
+pub(crate) fn monitors(app: &AppHandle) -> Vec<MonitorInfo> {
     app.available_monitors().unwrap_or_default().iter().map(|m| {
         let wa = m.work_area();
         let id = format!("{}|{}x{}", m.name().cloned().unwrap_or_default(), m.size().width, m.size().height);
@@ -41,26 +54,28 @@ fn set_rect(w: &WebviewWindow, r: PRect) {
     let _ = w.set_size(Size::Physical(PhysicalSize::new(r.w.max(1) as u32, r.h.max(1) as u32)));
     let _ = w.set_position(Position::Physical(PhysicalPosition::new(r.x, r.y)));
 }
-fn window_dip(t: &ToggleSettings) -> f64 { t.size + 2.0 * HALO }
-fn core_margin(t: &ToggleSettings) -> f64 { t.margin - HALO }
+pub(crate) fn dims(s: &Settings) -> Dims { Dims { thickness: s.toggle.thickness + HIT_EXTRA, length: s.toggle.length } }
 
-fn toggle_rect_now(app: &AppHandle) -> Option<(PRect, MonitorInfo)> {
+pub(crate) fn toggle_rect_now(app: &AppHandle) -> Option<(PRect, MonitorInfo)> {
     let s = settings(app);
-    let ms = monitors(app);
     let saved = s.placement.clone().unwrap_or_default();
-    let (p, m) = geometry::resolve_placement(&saved, &ms)?;
-    Some((geometry::toggle_rect(&p, window_dip(&s.toggle), core_margin(&s.toggle), &m), m))
+    let (p, m) = geometry::resolve_placement(&saved, &monitors(app))?;
+    Some((geometry::toggle_rect(&p, dims(&s), s.toggle.margin, &m), m))
 }
 
-fn place_toggle(app: &AppHandle) {
+pub(crate) fn place_toggle(app: &AppHandle) {
     let Some(w) = app.get_webview_window(TOGGLE) else { return };
+    let s = settings(app);
+    let side = s.placement.clone().unwrap_or_default().snap.side();
+    *state(app).visual.lock().unwrap_or_else(|e| e.into_inner()) = side;
     if let Some((r, _)) = toggle_rect_now(app) {
         state(app).ignore_moves_until.store(now_ms() + 400, SeqCst);
         set_rect(&w, r);
     }
+    let _ = app.emit("toggle-visual", side);
 }
 
-fn save(app: &AppHandle, s: Settings) -> Result<(), String> {
+pub(crate) fn save(app: &AppHandle, s: Settings) -> Result<(), String> {
     let st = state(app);
     let s = s.clamped();
     s.save(&st.path).map_err(|e| format!("cannot save settings: {e}"))?;
@@ -69,25 +84,26 @@ fn save(app: &AppHandle, s: Settings) -> Result<(), String> {
     Ok(())
 }
 
-/// Called once the user stopped dragging: snap to edge/corner, persist, re-apply.
-fn finish_drag(app: &AppHandle) {
+/// The user stopped dragging: dock to the nearest edge/corner (within the snap distance), persist, re-apply.
+pub(crate) fn finish_drag(app: &AppHandle) {
     let Some(w) = app.get_webview_window(TOGGLE) else { return };
     let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else { return };
     let s = settings(app);
     let r = PRect { x: pos.x, y: pos.y, w: size.width as i32, h: size.height as i32 };
-    if let Some(p) = geometry::placement_from_rect(r, window_dip(&s.toggle), core_margin(&s.toggle), s.toggle.snap_threshold, &monitors(app)) {
+    if let Some(p) = geometry::placement_from_rect(r, s.toggle.margin, s.toggle.snap_threshold, &monitors(app)) {
+        log(app, &format!("drag finished -> {:?}", p.snap));
         let mut n = s; n.placement = Some(p);
-        if let Err(e) = save(app, n) { eprintln!("{e}"); }
+        if let Err(e) = save(app, n) { log(app, &e); }
         place_toggle(app);
     }
 }
 
 fn create_toggle(app: &AppHandle) -> Result<(), String> {
     let s = settings(app);
-    let d = window_dip(&s.toggle);
+    let (w0, h0) = (s.toggle.thickness + HIT_EXTRA, s.toggle.length);
     let w = WebviewWindowBuilder::new(app, TOGGLE, WebviewUrl::App("index.html?w=toggle".into()))
         .title("Veyra").decorations(false).transparent(true).always_on_top(s.toggle.always_on_top).skip_taskbar(true)
-        .resizable(false).shadow(false).focused(false).visible(false).inner_size(d, d)
+        .resizable(false).shadow(false).focused(false).visible(false).inner_size(w0, h0)
         .build().map_err(|e| e.to_string())?;
     let app2 = app.clone();
     w.on_window_event(move |ev| match ev {
@@ -111,96 +127,111 @@ fn create_toggle(app: &AppHandle) -> Result<(), String> {
 
 fn panel_size(s: &Settings, collapsed: bool) -> (f64, f64) { (s.panel_width, if collapsed { COMPACT_H } else { s.panel_height }) }
 
-fn place_panel(app: &AppHandle, w: &WebviewWindow) {
+pub(crate) fn place_panel(app: &AppHandle, w: &WebviewWindow) {
     let s = settings(app);
     let Some((tr, m)) = toggle_rect_now(app) else { return };
     let (pw, ph) = panel_size(&s, state(app).panel_collapsed.load(SeqCst));
-    let r = geometry::panel_rect(tr, pw, ph, 8.0, &m);
-    set_rect(w, r);
+    set_rect(w, geometry::panel_rect(tr, pw, ph, 8.0, &m));
 }
 
 fn ensure_panel(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window(PANEL) { return Ok(w); }
     let s = settings(app);
     WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html?w=panel".into()))
-        .title("Veyra").decorations(false).transparent(true).always_on_top(s.panel_always_on_top).skip_taskbar(true)
+        .title("Veyra").decorations(false).transparent(true).always_on_top(s.panel_always_on_top).skip_taskbar(false)
         .resizable(true).min_inner_size(320.0, COMPACT_H).shadow(true).visible(false).focused(false)
         .inner_size(s.panel_width, s.panel_height).build().map_err(|e| e.to_string())
 }
 
-fn show_panel(app: &AppHandle) {
+pub(crate) fn show_panel(app: &AppHandle) {
     match ensure_panel(app) {
-        Ok(w) => { state(app).panel_collapsed.store(false, SeqCst); place_panel(app, &w); let _ = w.show(); let _ = w.set_focus(); let _ = app.emit("panel-visibility", true); let _ = app.emit("panel-collapsed", false); }
-        Err(e) => eprintln!("cannot create panel: {e}"),
+        Ok(w) => {
+            state(app).panel_collapsed.store(false, SeqCst);
+            place_panel(app, &w);
+            if let Err(e) = w.show() { log(app, &format!("panel show failed: {e}")); }
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            let _ = app.emit("panel-visibility", true);
+            let _ = app.emit("panel-collapsed", false);
+            log(app, "panel shown");
+        }
+        Err(e) => log(app, &format!("cannot create panel: {e}")),
     }
 }
-fn hide_panel(app: &AppHandle) {
+pub(crate) fn hide_panel(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(PANEL) { let _ = w.hide(); }
     let _ = app.emit("panel-visibility", false);
+    log(app, "panel hidden");
 }
-fn panel_visible(app: &AppHandle) -> bool { app.get_webview_window(PANEL).and_then(|w| w.is_visible().ok()).unwrap_or(false) }
+pub(crate) fn panel_visible(app: &AppHandle) -> bool { app.get_webview_window(PANEL).and_then(|w| w.is_visible().ok()).unwrap_or(false) }
+
+/// The toggle was clicked. First click opens the panel; the second follows the "second click" setting.
+pub(crate) fn toggle_clicked_impl(app: &AppHandle) {
+    log(app, "toggle clicked");
+    if !panel_visible(app) { show_panel(app); return; }
+    match settings(app).toggle.second_click {
+        SecondClick::Hide => hide_panel(app),
+        SecondClick::Collapse => {
+            let st = state(app);
+            let now = !st.panel_collapsed.load(SeqCst);
+            st.panel_collapsed.store(now, SeqCst);
+            if let Some(w) = app.get_webview_window(PANEL) { place_panel(app, &w); }
+            let _ = app.emit("panel-collapsed", now);
+        }
+    }
+}
 
 #[tauri::command] fn get_settings(app: AppHandle) -> Settings { settings(&app) }
+#[tauri::command] fn toggle_visual(app: AppHandle) -> Option<Side> { *state(&app).visual.lock().unwrap_or_else(|e| e.into_inner()) }
+#[tauri::command] fn log_ui(app: AppHandle, msg: String) { log(&app, &format!("ui: {}", msg.chars().take(300).collect::<String>())) }
+
+/// Window-creating commands MUST be `async`: building a webview window from a synchronous command blocks the main thread on Windows
+/// (Tauri documents this deadlock). That was the reason the first build's click did nothing.
+#[tauri::command]
+async fn toggle_clicked(app: AppHandle) { toggle_clicked_impl(&app); }
 
 #[tauri::command]
-fn update_settings(app: AppHandle, new: Settings) -> Result<Settings, String> {
+async fn update_settings(app: AppHandle, new: Settings) -> Result<Settings, String> {
     let old = settings(&app);
-    let mut n = new; n.placement = old.placement.clone(); // placement is only changed by dragging or reset
+    let mut n = new; n.placement = old.placement.clone(); // placement only changes by dragging or reset
     save(&app, n)?;
     let s = settings(&app);
-    if let Some(w) = app.get_webview_window(TOGGLE) {
-        let d = window_dip(&s.toggle);
-        let _ = w.set_always_on_top(s.toggle.always_on_top);
-        let _ = w.set_size(Size::Logical(tauri::LogicalSize::new(d, d)));
-        place_toggle(&app);
-    }
+    if let Some(w) = app.get_webview_window(TOGGLE) { let _ = w.set_always_on_top(s.toggle.always_on_top); place_toggle(&app); }
     if let Some(w) = app.get_webview_window(PANEL) { let _ = w.set_always_on_top(s.panel_always_on_top); }
     Ok(s)
 }
 
 #[tauri::command]
-fn reset_toggle_position(app: AppHandle) -> Result<(), String> {
+async fn reset_toggle_position(app: AppHandle) -> Result<(), String> {
     let mut s = settings(&app); s.placement = None; save(&app, s)?; place_toggle(&app); Ok(())
 }
-
-#[tauri::command]
-fn toggle_clicked(app: AppHandle) {
-    if !panel_visible(&app) { show_panel(&app); return; }
-    match settings(&app).toggle.second_click {
-        SecondClick::Hide => hide_panel(&app),
-        SecondClick::Collapse => {
-            let st = state(&app);
-            let now = !st.panel_collapsed.load(SeqCst);
-            st.panel_collapsed.store(now, SeqCst);
-            if let Some(w) = app.get_webview_window(PANEL) { place_panel(&app, &w); }
-            let _ = app.emit("panel-collapsed", now);
-        }
-    }
-}
-#[tauri::command] fn hide_panel_cmd(app: AppHandle) { hide_panel(&app) }
+#[tauri::command] async fn hide_panel_cmd(app: AppHandle) { hide_panel(&app) }
 #[tauri::command] fn quit_app(app: AppHandle) { app.exit(0) }
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _a, _c| show_panel(app)))
-        .invoke_handler(tauri::generate_handler![get_settings, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd])
+        .plugin(tauri_plugin_single_instance::init(|app, _a, _c| { let h = app.clone(); std::thread::spawn(move || show_panel(&h)); }))
+        .invoke_handler(tauri::generate_handler![get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory); // toggle-only app: no Dock icon
-            let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-            let path = dir.join("settings.json");
-            let s = Settings::load(&path);
-            app.manage::<S>(Arc::new(AppState { path, settings: RwLock::new(s), move_gen: AtomicU64::new(0), ignore_moves_until: AtomicU64::new(0), panel_collapsed: AtomicBool::new(false), topology: Mutex::new(String::new()) }));
+            let dir = std::env::var_os("VEYRA_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| app.path().app_data_dir().expect("app data dir"));
+            let s = Settings::load(&dir.join("settings.json"));
+            app.manage::<S>(Arc::new(AppState { path: dir.join("settings.json"), log_path: dir.join("logs").join("veyra.log"), settings: RwLock::new(s),
+                move_gen: AtomicU64::new(0), ignore_moves_until: AtomicU64::new(0), panel_collapsed: AtomicBool::new(false), topology: Mutex::new(String::new()), visual: Mutex::new(None) }));
             let h = app.handle().clone();
+            log(&h, "Veyra started");
             create_toggle(&h)?;
-            // Display changes (plug/unplug, resolution, wake from sleep): cheap local comparison every 3 s, no network, no OS hooks needed.
+            // Display changes (plug/unplug, resolution, wake from sleep): cheap local comparison every 3 s. No network, no OS hooks needed.
+            let hw = h.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(3));
-                let sig = topology_signature(&monitors(&h));
-                let st = state(&h);
+                let sig = topology_signature(&monitors(&hw));
+                let st = state(&hw);
                 let changed = { let mut t = st.topology.lock().unwrap_or_else(|e| e.into_inner()); let c = !t.is_empty() && *t != sig; *t = sig; c };
-                if changed { place_toggle(&h); if panel_visible(&h) { if let Some(w) = h.get_webview_window(PANEL) { place_panel(&h, &w); } } }
+                if changed { place_toggle(&hw); if panel_visible(&hw) { if let Some(w) = hw.get_webview_window(PANEL) { place_panel(&hw, &w); } } }
             });
+            if std::env::var_os("VEYRA_SELFTEST").is_some() { selftest::spawn(h); }
             Ok(())
         })
         .build(tauri::generate_context!())

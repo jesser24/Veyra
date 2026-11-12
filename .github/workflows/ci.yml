@@ -69,6 +69,23 @@ jobs:
           mkdir -p logs
           set -o pipefail
           npx tauri build --ci --bundles ${{ matrix.bundles }} 2>&1 | tee logs/tauri-build-${{ matrix.label }}.log
+      - name: Real-window self-test (toggle docking, click opens panel, second click, drag release)
+        # Runs the app itself with VEYRA_SELFTEST=1 on a real OS. continue-on-error until it has been seen passing on every runner.
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          mkdir -p logs "$RUNNER_TEMP/veyra-data"
+          BIN=$(ls target/release/Veyra.exe target/release/Veyra target/release/veyra 2>/dev/null | head -1)
+          echo "binary: $BIN"
+          VEYRA_SELFTEST=1 VEYRA_DATA_DIR="$RUNNER_TEMP/veyra-data" VEYRA_SELFTEST_OUT="$PWD/logs/selftest.json" "$BIN" &
+          pid=$!
+          for i in $(seq 1 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill $pid 2>/dev/null; wait $pid; echo "exit code: $?"
+          cp "$RUNNER_TEMP/veyra-data/logs/veyra.log" logs/veyra-app.log 2>/dev/null
+          test -f logs/selftest.json || { echo "selftest produced no result file"; exit 1; }
+          cat logs/selftest.json; echo
+          node -e "const r=JSON.parse(require('fs').readFileSync('logs/selftest.json','utf8')); r.checks.forEach(c=>console.log((c.ok?'PASS ':'FAIL ')+c.name+(c.ok?'':'  '+c.detail))); process.exit(r.ok?0:1)"
       - name: Verify installers exist (fails the job otherwise)
         shell: bash
         run: node scripts/verify-artifacts.mjs ${{ matrix.platform }} ${{ matrix.label }} release-out

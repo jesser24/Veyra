@@ -9,7 +9,8 @@ Legend: **Done+verified** = implemented and checked as described. **Compiles** =
 | Workspace, CI, release workflow | Compiles | Workflows written; first GitHub run pending |
 | Toggle geometry (edges, corners, margins, multi-monitor, DPI) | Done+verified (logic) | 8 unit tests incl. mixed DPI, unplugged monitor |
 | Settings persistence (atomic, corrupt-safe, clamped) | Done+verified | 4 unit tests |
-| Toggle window, drag, snap, click, panel placement | Compiles | `cargo check` on Linux; **not run on Windows or macOS** |
+| Toggle redesigned as an edge tab (flush to the edge, 75 % opacity by default) | Compiles | First user test rejected the round button; not yet seen on a real screen |
+| Click opens the panel | Fix pending user test | Cause: window created inside a synchronous command (deadlocks on Windows). Commands are now async; a real-window self-test runs in CI |
 | Toggle appearance settings (size, shape, colour, opacity, shadow, reflection, animations) | Compiles | UI built; visual check on real OS pending |
 | Native blur / Liquid-Glass backdrop | Planned | Needs Mica/Acrylic/NSVisualEffectView |
 | macOS floating NSPanel behaviour | Planned | |
