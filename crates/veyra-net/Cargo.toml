@@ -1,0 +1,18 @@
+[package]
+name = "veyra-net"
+version = "0.1.0"
+edition = "2021"
+description = "The only place in Veyra allowed to open a network connection: policy, ledger and classification."
+
+[features]
+test-support = []
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream", "http2"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

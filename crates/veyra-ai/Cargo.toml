@@ -1,0 +1,25 @@
+[package]
+name = "veyra-ai"
+version = "0.1.0"
+edition = "2021"
+description = "Local AI for Veyra: hardware detection, model catalog and recommendation, verified resumable download, llama.cpp engine supervisor, context building."
+
+[dependencies]
+veyra-net = { path = "../veyra-net" }
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "process", "fs", "io-util"] }
+getrandom = "0.3"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+veyra-net = { path = "../veyra-net", features = ["test-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process"] }
+
+[[bin]]
+name = "fake-llama-server"
+path = "src/bin/fake_llama_server.rs"

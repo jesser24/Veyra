@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/veyra-core", "crates/veyra-store", "src-tauri"]
+members = ["crates/veyra-core", "crates/veyra-store", "crates/veyra-net", "crates/veyra-ai", "src-tauri"]
 
 [profile.release]
 opt-level = "s"
