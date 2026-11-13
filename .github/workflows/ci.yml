@@ -139,6 +139,13 @@ jobs:
       - name: Make the engine executable (artifact download drops the mode bit)
         if: matrix.platform == 'macos'
         run: chmod +x src-tauri/resources/llama/llama-server
+      - name: Windows only - use Strawberry Perl for the vendored OpenSSL build (Git's MSYS perl lacks modules)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ls -la /c/Strawberry/perl/bin/perl.exe
+          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+          (command -v nasm || ls "/c/Program Files/NASM/nasm.exe") 2>&1 || echo "no NASM found (OpenSSL falls back to portable C code if so)"
       - name: Build (logs kept)
         shell: bash
         run: |
