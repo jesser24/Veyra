@@ -47,8 +47,9 @@ fn client() -> NetClient { NetClient::new(Config::default()).unwrap() }
 #[tokio::test] async fn connection_failure_is_classified_and_recorded() {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap(); let port = l.local_addr().unwrap().port(); drop(l);
     let c = client();
-    let r = c.request(Purpose::LocalEngine, Initiator::Internal, reqwest::Method::GET, &format!("http://127.0.0.1:{port}/"), &[], None, Some(Duration::from_secs(2))).await;
-    assert!(matches!(r, Err(NetError::Failed(ErrorClass::Connect, _))), "{:?}", r.err());
+    let r = c.request(Purpose::LocalEngine, Initiator::Internal, reqwest::Method::GET, &format!("http://127.0.0.1:{port}/"), &[], None, Some(Duration::from_secs(10))).await;
+    // Windows retries a refused loopback connection for ~2 s, so the connect timeout can fire first: both are honest classifications of "could not connect".
+    assert!(matches!(r, Err(NetError::Failed(ErrorClass::Connect | ErrorClass::Timeout, _))), "{:?}", r.err());
     let s = c.ledger.summary(); assert_eq!((s.requests, s.errors, s.in_flight), (1, 1, 0));
 }
 #[tokio::test] async fn dropped_response_is_marked_cancelled_not_left_in_flight() {
