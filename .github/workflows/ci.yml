@@ -80,6 +80,36 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: "llama-${{ matrix.label }}", path: llama-out/, if-no-files-found: error }
 
+  real-inference:
+    # REAL inference: the real llama-server built above + a real model downloaded through Veyra's own gateway (official Hugging Face URL, SHA-256 checked).
+    # Qwen3-0.6B is used because it is small enough for a CI runner; it proves the whole pipeline, not the speed of the recommended 4B model.
+    name: Real inference, Qwen3-0.6B (${{ matrix.label }})
+    needs: [llama]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2022 }
+          - { label: macos-arm64, os: macos-15 }
+          - { label: macos-x64, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with: { name: "llama-${{ matrix.label }}", path: llama-out }
+      - name: Run the benchmark with --check (download, load, stream, cancel, long prompt, unload/reload)
+        shell: bash
+        run: |
+          chmod +x llama-out/llama-server 2>/dev/null || true
+          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model qwen3-0.6b-q8_0 --runs 2 --long --check --out bench-${{ matrix.label }}.json 2>&1 | tee bench-${{ matrix.label }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "bench-${{ matrix.label }}", path: "bench-${{ matrix.label }}.*", if-no-files-found: warn }
+
   bundle:
     name: Bundle ${{ matrix.label }}
     needs: [web, core, llama]

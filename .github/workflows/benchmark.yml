@@ -1,0 +1,32 @@
+name: Benchmark (manual)
+# Real-model benchmark on a GitHub runner. NOTE: runner hardware is NOT your computer; to measure the Dell, run docs/BENCHMARK.md locally.
+on:
+  workflow_dispatch:
+    inputs:
+      model: { description: "Catalog model id", default: "qwen3-4b-q5_k_m", required: true }
+      ctx: { description: "Context size", default: "8192", required: true }
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2022 }
+          - { label: macos-arm64, os: macos-15 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build llama-server from the pinned commit
+        shell: bash
+        run: scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/llama-out"
+      - name: Benchmark
+        shell: bash
+        run: |
+          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model "${{ inputs.model }}" --ctx "${{ inputs.ctx }}" --runs 3 --long --out bench.json | tee bench.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "benchmark-${{ matrix.label }}", path: "bench.*" }

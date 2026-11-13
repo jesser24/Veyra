@@ -89,6 +89,7 @@ impl Engine {
         Ok(e)
     }
     pub fn port(&self) -> u16 { self.port }
+    pub fn pid(&self) -> Option<u32> { self.child.id() }
     pub async fn verify_identity(&mut self) -> bool {
         if !self.is_alive() { return false; }
         match self.net.request(Purpose::LocalEngine, Initiator::Internal, reqwest::Method::GET, &self.url("/props"), &self.auth(), None, Some(Duration::from_secs(3))).await { Ok(mut r) => { let ok = r.status() == 200; while let Ok(Some(_)) = r.chunk().await {} ok } Err(_) => false }
