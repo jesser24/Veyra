@@ -10,6 +10,7 @@ fn handle(mut s: TcpStream, key: String) {
     let mut body = vec![0u8; len]; r.read_exact(&mut body).ok();
     if path == "/health" { let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}"); return; }
     if !auth_ok { let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
+    if path == "/props" { let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"); return; }
     if path == "/tokenize" { let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default(); let n = v["content"].as_str().unwrap_or("").split_whitespace().count();
         let out = serde_json::json!({ "tokens": vec![1; n] }).to_string(); let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", out.len(), out); return; }
     if path == "/v1/chat/completions" {

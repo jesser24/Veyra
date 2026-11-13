@@ -53,9 +53,36 @@ jobs:
       # process supervision, loopback streaming, cancellation and resumable download behave differently per OS: test on each
       - run: cargo test -p veyra-net -p veyra-ai --locked
 
+  llama:
+    name: llama-server b12336 (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: windows-x64, os: windows-2022, arch: x64 }
+          - { label: macos-arm64, os: macos-15, arch: arm64 }
+          - { label: macos-x64, os: macos-15-intel, arch: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - name: Build llama-server from the pinned commit (no prebuilt binary is downloaded)
+        shell: bash
+        run: scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/llama-out"
+      - name: Check architecture (from the file header) and that it starts
+        shell: bash
+        run: |
+          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          node scripts/check-binary.mjs "$EXE" ${{ matrix.arch }}
+          "$EXE" --help | grep -E -- "--api-key|--jinja|--ctx-size|--threads|--parallel|--no-ui|--host|--port" | head -20
+      - uses: actions/upload-artifact@v4
+        with: { name: "llama-${{ matrix.label }}", path: llama-out/, if-no-files-found: error }
+
   bundle:
     name: Bundle ${{ matrix.label }}
-    needs: [web, core]
+    needs: [web, core, llama]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -77,6 +104,11 @@ jobs:
           rustc --version; cargo --version; node --version; npm --version
       - run: npm ci
         shell: bash
+      - uses: actions/download-artifact@v4
+        with: { name: "llama-${{ matrix.label }}", path: src-tauri/resources/llama }
+      - name: Make the engine executable (artifact download drops the mode bit)
+        if: matrix.platform == 'macos'
+        run: chmod +x src-tauri/resources/llama/llama-server
       - name: Build (logs kept)
         shell: bash
         run: |

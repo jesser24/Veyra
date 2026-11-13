@@ -33,13 +33,28 @@ pub struct Status { pub loaded: bool, pub model: Option<String>, pub ctx: u32, p
 pub struct GenParams { pub max_tokens: u32, pub temperature: f32, pub top_p: f32, pub thinking: bool }
 impl Default for GenParams { fn default() -> Self { Self { max_tokens: 1024, temperature: 0.7, top_p: 0.8, thinking: false } } }
 
+/// Longest silence tolerated mid-generation (long prompts on a slow CPU legitimately take minutes before the first token).
+const STALL: Duration = Duration::from_secs(600);
+
 pub struct Engine { child: Child, port: u16, key: String, net: NetClient, cfg: EngineConfig, load_ms: u64, log_tail: std::sync::Arc<std::sync::Mutex<String>> }
 
 fn random_key() -> String { let mut b = [0u8; 16]; getrandom::fill(&mut b).expect("os rng"); b.iter().map(|x| format!("{x:02x}")).collect() }
 fn free_port() -> std::io::Result<u16> { Ok(std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port()) }
 
 impl Engine {
+    /// Starts the engine. If the chosen port was taken between our probe and llama-server's bind (a race no probe can fully prevent),
+    /// a fresh port is tried, up to 3 times. Any other failure is returned immediately.
     pub async fn load(net: NetClient, cfg: EngineConfig) -> Result<Engine, EngineError> {
+        let mut last = None;
+        for _ in 0..3 {
+            match Engine::load_once(net.clone(), cfg.clone()).await {
+                Err(EngineError::ExitedEarly(m)) if { let l = m.to_lowercase(); l.contains("address already in use") || l.contains("couldn't bind") || l.contains("could not bind") || l.contains("10048") } => last = Some(EngineError::ExitedEarly(m)),
+                other => return other,
+            }
+        }
+        Err(last.unwrap())
+    }
+    async fn load_once(net: NetClient, cfg: EngineConfig) -> Result<Engine, EngineError> {
         let port = free_port().map_err(|e| EngineError::Spawn(e.to_string()))?; let key = random_key(); let t0 = Instant::now();
         let mut cmd = Command::new(&cfg.server_bin);
         cmd.arg("--model").arg(&cfg.model).args(["--host", "127.0.0.1", "--port"]).arg(port.to_string()).args(["--api-key", &key])
@@ -61,7 +76,17 @@ impl Engine {
             if Instant::now() > deadline { let _ = e.child.kill().await; return Err(EngineError::LoadTimeout); }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
-        e.load_ms = t0.elapsed().as_millis() as u64; Ok(e)
+        // Identity: /health needs no key, so something else listening on this port would also answer it. /props requires OUR random key,
+        // and our own child must still be alive: together this proves the answering server is the one Veyra started.
+        if !e.verify_identity().await { let _ = e.child.kill().await; return Err(EngineError::Protocol("the server on the engine port did not accept Veyra's key; refusing to use it".into())); }
+        e.load_ms = t0.elapsed().as_millis() as u64;
+        if let Some(pid) = e.child.id() { write_pidfile(&e.cfg, pid); }
+        Ok(e)
+    }
+    pub fn port(&self) -> u16 { self.port }
+    pub async fn verify_identity(&mut self) -> bool {
+        if !self.is_alive() { return false; }
+        match self.net.request(Purpose::LocalEngine, Initiator::Internal, reqwest::Method::GET, &self.url("/props"), &self.auth(), None, Some(Duration::from_secs(3))).await { Ok(mut r) => { let ok = r.status() == 200; while let Ok(Some(_)) = r.chunk().await {} ok } Err(_) => false }
     }
     fn tail(&self) -> String { self.log_tail.lock().unwrap_or_else(|e| e.into_inner()).trim().chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect() }
     fn url(&self, p: &str) -> String { format!("http://127.0.0.1:{}{p}", self.port) }
@@ -89,13 +114,13 @@ impl Engine {
         if !self.is_alive() { return Err(EngineError::Protocol(format!("engine is not running: {}", self.tail()))); }
         let body = serde_json::to_vec(&serde_json::json!({ "messages": messages, "stream": true, "max_tokens": p.max_tokens, "temperature": p.temperature, "top_p": p.top_p,
             "chat_template_kwargs": { "enable_thinking": p.thinking } })).unwrap();
-        let t0 = Instant::now();
+        let t0 = Instant::now(); let mut last_data = Instant::now();
         let mut r = self.net.request(Purpose::LocalEngine, Initiator::Internal, reqwest::Method::POST, &self.url("/v1/chat/completions"), &self.auth(), Some(body), Some(Duration::from_secs(3600))).await?;
         if r.status() != 200 { let mut b = vec![]; while let Ok(Some(c)) = r.chunk().await { b.extend_from_slice(&c); if b.len() > 2000 { break; } } r.finish(Some(ErrorClass::Http)); return Err(EngineError::Protocol(format!("HTTP {}: {}", r.status(), String::from_utf8_lossy(&b)))); }
         let (mut answer, mut pending, mut perf) = (String::new(), String::new(), Perf { load_ms: Some(self.load_ms), ..Default::default() });
         'outer: loop {
             if cancel.load(Ordering::Relaxed) { r.finish(Some(ErrorClass::Cancelled)); return Err(EngineError::Cancelled); } // dropping `r` closes the socket: llama-server aborts the generation
-            let chunk = match tokio::time::timeout(Duration::from_millis(250), r.chunk()).await { Err(_) => continue, Ok(Ok(Some(c))) => c, Ok(Ok(None)) => break, Ok(Err(e)) => return Err(e.into()) };
+            let chunk = match tokio::time::timeout(Duration::from_millis(250), r.chunk()).await { Err(_) => { if last_data.elapsed() > STALL { r.finish(Some(ErrorClass::Timeout)); return Err(EngineError::Protocol(format!("the engine produced nothing for {} s; generation abandoned", STALL.as_secs()))); } if !self.child.try_wait().map(|x| x.is_none()).unwrap_or(false) { return Err(EngineError::Protocol(format!("the engine process died during generation: {}", self.tail()))); } continue } Ok(Ok(Some(c))) => { last_data = Instant::now(); c } Ok(Ok(None)) => break, Ok(Err(e)) => return Err(e.into()) };
             pending.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(i) = pending.find('\n') {
                 let line = pending[..i].trim().to_string(); pending.drain(..=i);
@@ -113,10 +138,31 @@ impl Engine {
         r.finish(None); perf.wall_ms = t0.elapsed().as_millis() as u64; Ok((answer, perf))
     }
     /// Frees the model's memory by ending the process.
-    pub async fn unload(mut self) { let _ = self.child.kill().await; let _ = self.child.wait().await; }
+    pub async fn unload(mut self) {
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await; // a process that survives 10 s is reported by reap_orphans at next start
+        let _ = std::fs::remove_file(pidfile(&self.cfg));
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn rss_mib(pid: u32) -> Option<u64> { std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse::<u64>().ok().map(|k| k / 1024) }
 #[cfg(not(target_os = "linux"))]
 fn rss_mib(pid: u32) -> Option<u64> { use sysinfo::{Pid, ProcessesToUpdate, System}; let mut s = System::new(); let p = Pid::from_u32(pid); s.refresh_processes(ProcessesToUpdate::Some(&[p]), true); s.process(p).map(|p| p.memory() / 1_048_576) }
+
+fn pidfile(cfg: &EngineConfig) -> PathBuf { cfg.model.parent().unwrap_or(std::path::Path::new(".")).join("engine.pid") }
+fn write_pidfile(cfg: &EngineConfig, pid: u32) { let _ = std::fs::write(pidfile(cfg), format!("{pid}\n{}\n", cfg.server_bin.display())); }
+
+/// After a crash or forced quit the previous engine may still be running (it would hold gigabytes of RAM). At startup, if a pidfile exists
+/// and that pid is STILL a process whose executable is our server binary, it is killed. Anything else (pid reused by an unrelated program) is left alone.
+/// Returns true if an orphan was killed.
+pub fn reap_orphans(dir: &std::path::Path, server_bin: &std::path::Path) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let pf = dir.join("engine.pid"); let Ok(t) = std::fs::read_to_string(&pf) else { return false };
+    let _ = std::fs::remove_file(&pf);
+    let Some(pid) = t.lines().next().and_then(|l| l.trim().parse::<u32>().ok()) else { return false };
+    let mut sys = System::new(); let p = Pid::from_u32(pid); sys.refresh_processes(ProcessesToUpdate::Some(&[p]), true);
+    let Some(proc_) = sys.process(p) else { return false };
+    let same = proc_.exe().map(|e| e == server_bin || e.file_name() == server_bin.file_name()).unwrap_or(false);
+    if same { proc_.kill() } else { false }
+}
