@@ -56,12 +56,16 @@ impl Engine {
     }
     async fn load_once(net: NetClient, cfg: EngineConfig) -> Result<Engine, EngineError> {
         let port = free_port().map_err(|e| EngineError::Spawn(e.to_string()))?; let key = random_key(); let t0 = Instant::now();
+        // The key goes through a private file, not the command line: command lines are readable by every local user in the process list.
+        let keyfile = cfg.model.parent().unwrap_or(std::path::Path::new(".")).join(format!("engine-{port}.key"));
+        write_private(&keyfile, &key).map_err(|e| EngineError::Spawn(format!("cannot write the engine key file: {e}")))?;
         let mut cmd = Command::new(&cfg.server_bin);
-        cmd.arg("--model").arg(&cfg.model).args(["--host", "127.0.0.1", "--port"]).arg(port.to_string()).args(["--api-key", &key])
+        cmd.arg("--model").arg(&cfg.model).args(["--host", "127.0.0.1", "--port"]).arg(port.to_string()).arg("--api-key-file").arg(&keyfile)
             .args(["--ctx-size", &cfg.ctx.to_string(), "--threads", &cfg.threads.to_string(), "--parallel", "1", "--jinja", "--no-webui"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(windows)] { cmd.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW: no console flash
-        let mut child = cmd.spawn().map_err(|e| EngineError::Spawn(format!("{}: {e}", cfg.server_bin.display())))?;
+        let spawned = cmd.spawn();
+        let mut child = match spawned { Ok(c) => c, Err(e) => { let _ = std::fs::remove_file(&keyfile); return Err(EngineError::Spawn(format!("{}: {e}", cfg.server_bin.display()))); } };
         let log_tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         for s in [child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), child.stderr.take().map(|s| Box::new(s) as _)].into_iter().flatten() {
             let t = log_tail.clone();
@@ -69,6 +73,7 @@ impl Engine {
                 while let Ok(Some(line)) = l.next_line().await { let mut g = t.lock().unwrap_or_else(|e| e.into_inner()); g.push_str(&line); g.push('\n'); if g.len() > 4000 { let cut = g.len() - 3000; let cut = (cut..g.len()).find(|i| g.is_char_boundary(*i)).unwrap_or(g.len()); *g = g[cut..].to_string(); } } });
         }
         let mut e = Engine { child, port, key, net, cfg, load_ms: 0, log_tail };
+        let _guard = KeyFileGuard(keyfile); // removed as soon as loading ends (success or failure): the server has read it by then
         let deadline = Instant::now() + e.cfg.load_timeout;
         loop {
             if let Ok(Some(st)) = e.child.try_wait() { tokio::time::sleep(Duration::from_millis(100)).await; return Err(EngineError::ExitedEarly(format!("exit {st}; {}", e.tail()))); }
@@ -165,4 +170,11 @@ pub fn reap_orphans(dir: &std::path::Path, server_bin: &std::path::Path) -> bool
     let Some(proc_) = sys.process(p) else { return false };
     let same = proc_.exe().map(|e| e == server_bin || e.file_name() == server_bin.file_name()).unwrap_or(false);
     if same { proc_.kill() } else { false }
+}
+
+struct KeyFileGuard(PathBuf);
+impl Drop for KeyFileGuard { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+fn write_private(p: &std::path::Path, content: &str) -> std::io::Result<()> {
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; use std::io::Write; let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(p)?; f.write_all(content.as_bytes()) }
+    #[cfg(not(unix))] { std::fs::write(p, content) } // Windows: the per-user app-data folder is already private to the user's account
 }

@@ -18,6 +18,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 veyra-core = { path = "../crates/veyra-core" }
+veyra-net = { path = "../crates/veyra-net" }
+veyra-ai = { path = "../crates/veyra-ai" }
+veyra-store = { path = "../crates/veyra-store" }
+reqwest = { version = "0.12", default-features = false }
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }

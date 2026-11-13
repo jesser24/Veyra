@@ -4,6 +4,14 @@ import { api } from "./lib/api";
 import { useSettings } from "./lib/useSettings";
 import { clamp } from "./lib/theme";
 import type { Settings, Shape, ToggleSettings } from "./lib/types";
+import { ai, vault } from "./lib/ai";
+import { Chat } from "./views/Chat";
+import { AiManager } from "./views/AiManager";
+import { NetworkView } from "./views/NetworkView";
+import { VaultGate } from "./views/VaultGate";
+
+type Tab = "chat" | "ai" | "network" | "settings";
+const TABS: Array<[Tab, string]> = [["chat", "Chat"], ["ai", "AI"], ["network", "Network"], ["settings", "Settings"]];
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return <label className="row"><span className="lbl">{label}{hint && <small>{hint}</small>}</span>{children}</label>;
@@ -15,6 +23,10 @@ export function Panel() {
   const [open, setOpen] = useState(true);
   useEffect(() => { let off: (() => void) | undefined; listen<boolean>("panel-visibility", (e) => setOpen(e.payload)).then((f) => { off = f; }); return () => off?.(); }, []);
   const [err, setErr] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("chat"); const [vs, setVs] = useState<{ exists: boolean; unlocked: boolean } | null>(null); const [loaded, setLoaded] = useState(false);
+  const refreshVault = () => vault.status().then(setVs).catch(() => setVs({ exists: false, unlocked: false }));
+  const refreshEngine = () => ai.status().then((st) => setLoaded(st.loaded)).catch(() => setLoaded(false));
+  useEffect(() => { void refreshVault(); void refreshEngine(); }, []);
   useEffect(() => { let off: (() => void) | undefined; api.onCollapsed(setCollapsed).then((f) => { off = f; }); return () => off?.(); }, []);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") void api.hidePanel(); }; window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, []);
   if (!s) return null;
@@ -31,11 +43,12 @@ export function Panel() {
         <span className="sp" data-tauri-drag-region />
         <button className="icon" aria-label="Close" title="Close (Esc)" onClick={() => void api.hidePanel()}>✕</button>
       </header>
-      {!collapsed && (
+      {!collapsed && <nav className="tabs" role="tablist">{TABS.map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}</nav>}
+      {!collapsed && tab === "chat" && (vs?.unlocked ? <Chat modelLoaded={loaded} onOpenAi={() => setTab("ai")} /> : vs ? <VaultGate exists={vs.exists} onOpen={() => void refreshVault()} /> : null)}
+      {!collapsed && tab === "ai" && <main><AiManager onChanged={() => void refreshEngine()} /></main>}
+      {!collapsed && tab === "network" && <main><NetworkView /></main>}
+      {!collapsed && tab === "settings" && (
         <main>
-          <section className="note" role="status">
-            <b>Local AI chat is not installed yet.</b> The conversation window, the model manager (llama.cpp + Qwen3) and the encrypted history are the next development phases. Below are the settings that already work.
-          </section>
           <h2>Toggle</h2>
           <Row label="Tab thickness">{num("thickness", 6, 20, 1, (v) => `${v} px`)}</Row>
           <Row label="Tab length">{num("length", 40, 200, 1, (v) => `${v} px`)}</Row>
@@ -54,7 +67,7 @@ export function Panel() {
           <Row label="Theme"><select value={s.theme} onChange={(e) => push({ ...s, theme: e.target.value as Settings["theme"] })}><option value="system">Automatic</option><option value="light">Light</option><option value="dark">Dark</option></select></Row>
           <Row label="Window always on top"><input type="checkbox" checked={s.panel_always_on_top} onChange={(e) => push({ ...s, panel_always_on_top: e.target.checked })} /></Row>
           {err && <p className="err" role="alert">{err}</p>}
-          <footer><span>Network: none. No telemetry.</span><button onClick={() => void api.quit()}>Quit Veyra</button></footer>
+          <footer><span>No telemetry. See the Network tab.</span><button onClick={() => void api.quit()}>Quit Veyra</button></footer>
         </main>
       )}
     </div>

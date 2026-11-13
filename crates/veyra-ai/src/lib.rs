@@ -5,3 +5,4 @@ pub mod context;
 pub mod download;
 pub mod engine;
 pub mod hardware;
+pub mod installed;

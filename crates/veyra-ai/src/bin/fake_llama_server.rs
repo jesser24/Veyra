@@ -26,7 +26,8 @@ fn handle(mut s: TcpStream, key: String) {
 fn main() {
     let a: Vec<String> = std::env::args().collect(); let get = |f: &str| a.iter().position(|x| x == f).and_then(|i| a.get(i + 1)).cloned();
     let model = get("--model").expect("--model"); if std::fs::metadata(&model).map(|m| m.len() == 0).unwrap_or(true) { eprintln!("failed to load model {model}"); std::process::exit(1); }
-    let (port, key) = (get("--port").expect("--port"), get("--api-key").expect("--api-key"));
+    let port = get("--port").expect("--port");
+    let key = match get("--api-key-file") { Some(f) => std::fs::read_to_string(f).expect("key file").trim().to_string(), None => get("--api-key").expect("--api-key") };
     if let Some(ms) = std::env::var("FAKE_LOAD_MS").ok().and_then(|v| v.parse().ok()) { std::thread::sleep(std::time::Duration::from_millis(ms)); }
     let l = TcpListener::bind(format!("127.0.0.1:{port}")).expect("bind");
     for c in l.incoming().flatten() { let k = key.clone(); std::thread::spawn(move || handle(c, k)); }

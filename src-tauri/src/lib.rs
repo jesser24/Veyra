@@ -264,10 +264,18 @@ async fn reset_toggle_position(app: AppHandle) -> Result<(), String> {
 #[tauri::command] async fn hide_panel_cmd(app: AppHandle) { hide_panel(&app) }
 #[tauri::command] fn quit_app(app: AppHandle) { app.exit(0) }
 
+mod ai;
+
+#[tauri::command] async fn net_summary(ai: tauri::State<'_, Arc<ai::Ai>>) -> Result<veyra_net::Summary, String> { Ok(ai.net.ledger.summary()) }
+#[tauri::command] async fn net_entries(ai: tauri::State<'_, Arc<ai::Ai>>) -> Result<Vec<veyra_net::Entry>, String> { Ok(ai.net.ledger.entries()) }
+#[tauri::command] async fn net_clear(ai: tauri::State<'_, Arc<ai::Ai>>) -> Result<(), String> { ai.net.ledger.clear(); Ok(()) }
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _a, _c| { let h = app.clone(); std::thread::spawn(move || show_panel(&h)); }))
-        .invoke_handler(tauri::generate_handler![get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd])
+        .invoke_handler(tauri::generate_handler![get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd,
+            net_summary, net_entries, net_clear, ai::ai_overview, ai::ai_download, ai::ai_download_cancel, ai::ai_verify, ai::ai_delete_model, ai::ai_load, ai::ai_unload, ai::ai_status, ai::ai_cancel, ai::ai_test,
+            ai::vault_status, ai::vault_create, ai::vault_unlock, ai::vault_unlock_recovery, ai::vault_lock, ai::conv_list, ai::conv_messages, ai::conv_create, ai::conv_rename, ai::conv_archive, ai::conv_trash, ai::conv_restore, ai::conv_delete_permanently, ai::chat_send])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory); // toggle-only app: no Dock icon
@@ -275,8 +283,12 @@ pub fn run() {
             let s = Settings::load(&dir.join("settings.json"));
             app.manage::<S>(Arc::new(AppState { path: dir.join("settings.json"), log_path: dir.join("logs").join("veyra.log"), settings: RwLock::new(s),
                 move_gen: AtomicU64::new(0), ignore_moves_until: AtomicU64::new(0), panel_collapsed: AtomicBool::new(false), panel_gen: AtomicU64::new(0), panel_open: AtomicBool::new(false), topology: Mutex::new(String::new()), visual: Mutex::new(None) }));
+            let aiq = Arc::new(ai::Ai::new(dir.clone()).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?);
+            app.manage(aiq);
             let h = app.handle().clone();
             log(&h, "Veyra started");
+            // an engine left running by a crash would hold gigabytes of RAM: end it before anything else starts
+            if let Some(bin) = ai::engine_binary(&h) { if veyra_ai::engine::reap_orphans(&dir.join("models"), &bin) { log(&h, "ended an inference engine left over from a previous run"); } }
             create_toggle(&h)?;
             // Display changes (plug/unplug, resolution, wake from sleep): cheap local comparison every 3 s. No network, no OS hooks needed.
             let hw = h.clone();
@@ -292,7 +304,10 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Veyra")
-        .run(|_app, ev| {
+        .run(|app, ev| {
+            if let tauri::RunEvent::Exit = ev { // the engine child must never outlive Veyra
+                if let Some(ai) = app.try_state::<Arc<ai::Ai>>() { let ai = ai.inner().clone(); tauri::async_runtime::block_on(ai::shutdown(&ai)); }
+            }
             // Closing every window must not quit: Veyra lives in the toggle.
             if let tauri::RunEvent::ExitRequested { api, code, .. } = ev { if code.is_none() { api.prevent_exit(); } }
         });

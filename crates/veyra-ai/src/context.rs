@@ -42,6 +42,15 @@ pub fn summary_request(previous_summary: Option<&str>, turns: &[Msg]) -> Vec<Msg
     vec![Msg { role: "system".into(), content: "You compress conversations. Write a faithful, compact summary (under 300 words) that preserves facts, decisions, names, numbers, file and function names, user preferences and unresolved questions. Do not add anything that was not said. Reply with the summary only. /no_think".into() }, Msg { role: "user".into(), content: t }]
 }
 
+/// A stored summary carries how many leading messages it covers (`[[covers:N]]` first line), so a stale summary is detected and extended
+/// instead of silently losing the turns between its coverage and the verbatim window.
+pub fn encode_summary(covers: usize, text: &str) -> String { format!("[[covers:{covers}]]\n{}", text.trim()) }
+pub fn decode_summary(stored: Option<&str>) -> (usize, Option<String>) {
+    let Some(s) = stored.filter(|s| !s.trim().is_empty()) else { return (0, None) };
+    if let Some(rest) = s.strip_prefix("[[covers:") { if let Some((n, body)) = rest.split_once("]]") { if let Ok(n) = n.parse() { return (n, Some(body.trim().to_string())); } } }
+    (0, Some(s.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +74,10 @@ mod tests {
     #[test] fn the_last_message_is_kept_even_if_it_alone_exceeds_the_budget() {
         let h = vec![m("user", "old"), m("assistant", "older"), m("user", &"z".repeat(10_000))]; let b = build("", None, &h, 100, &est);
         assert_eq!(b.messages.last().unwrap().content.len(), 10_000);
+    }
+    #[test] fn summary_coverage_round_trips_and_legacy_text_counts_as_covering_nothing() {
+        assert_eq!(decode_summary(Some(&encode_summary(12, " facts "))), (12, Some("facts".into())));
+        assert_eq!(decode_summary(Some("plain")), (0, Some("plain".into()))); assert_eq!(decode_summary(None), (0, None)); assert_eq!(decode_summary(Some("  ")), (0, None));
     }
     #[test] fn summary_request_contains_previous_summary_and_turns() {
         let r = summary_request(Some("prev"), &[m("user", "hi")]); assert!(r[1].content.contains("prev") && r[1].content.contains("user: hi"));
