@@ -49,10 +49,12 @@ pub fn spawn(app: AppHandle) {
             toggle_clicked_impl(&app); sleep(800);
             let h2 = pw.as_ref().and_then(rect_of).map(|r| r.h).unwrap_or(0);
             check("third click expands", h2 > h, format!("{h} -> {h2}"));
-            hide_panel(&app);
+            check("toggle hidden from the taskbar (WS_EX_TOOLWINDOW; Windows only)", is_tool_window(&t).unwrap_or(true), format!("{:?}", is_tool_window(&t)));
+            check("panel hidden from the taskbar (WS_EX_TOOLWINDOW; Windows only)", pw.as_ref().map(|w| is_tool_window(w).unwrap_or(true)).unwrap_or(false), String::new());
+            hide_panel(&app); sleep(400);
             // simulated drag release near the left edge -> docks and persists
             let _ = t.set_position(Position::Physical(PhysicalPosition::new(m.x + 6, m.y + m.h / 2)));
-            sleep(400); finish_drag(&app); sleep(500);
+            sleep(400); finish_drag(&app); sleep(900);
             let saved = Settings::load(&state(&app).path);
             check("drag release near left edge docks to Left and persists", matches!(saved.placement.map(|p| p.snap), Some(Snap::Edge(Side::Left))), String::new());
         }

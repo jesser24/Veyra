@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "./lib/api";
 import { useSettings } from "./lib/useSettings";
 import { clamp } from "./lib/theme";
@@ -11,6 +12,8 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 export function Panel() {
   const s = useSettings();
   const [collapsed, setCollapsed] = useState(false);
+  const [open, setOpen] = useState(true);
+  useEffect(() => { let off: (() => void) | undefined; listen<boolean>("panel-visibility", (e) => setOpen(e.payload)).then((f) => { off = f; }); return () => off?.(); }, []);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => { let off: (() => void) | undefined; api.onCollapsed(setCollapsed).then((f) => { off = f; }); return () => off?.(); }, []);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") void api.hidePanel(); }; window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, []);
@@ -21,7 +24,7 @@ export function Panel() {
     <span className="ctl"><input type="range" min={min} max={max} step={step} value={s.toggle[k]} onChange={(e) => setT({ [k]: clamp(Number(e.target.value), min, max) })} /><output>{fmt(s.toggle[k])}</output></span>
   );
   return (
-    <div className="panel" role="application" aria-label="Veyra">
+    <div className={`panel ${open ? "in" : "out"}`} role="application" aria-label="Veyra">
       <header data-tauri-drag-region>
         <img src="/veyra-mark.png" alt="" draggable={false} data-tauri-drag-region />
         <strong data-tauri-drag-region>Veyra</strong>

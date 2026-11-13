@@ -11,6 +11,29 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Positio
 use veyra_core::geometry::{self, Dims, MonitorInfo, PRect, Side};
 use veyra_core::settings::{SecondClick, Settings};
 
+/// Windows: WS_EX_TOOLWINDOW keeps a window out of the taskbar and Alt-Tab reliably (Tauri's `skip_taskbar` alone can be lost when a
+/// hidden window is shown later). WS_EX_NOACTIVATE additionally stops the toggle from stealing focus when clicked. Same approach as MyPinboard.
+#[cfg(windows)]
+mod win {
+    extern "system" { fn GetWindowLongPtrW(h: isize, i: i32) -> isize; fn SetWindowLongPtrW(h: isize, i: i32, v: isize) -> isize; }
+    const GWL_EXSTYLE: i32 = -20; pub const TOOLWINDOW: isize = 0x80; pub const NOACTIVATE: isize = 0x0800_0000;
+    pub fn add_ex_style(h: isize, flags: isize) { unsafe { let ex = GetWindowLongPtrW(h, GWL_EXSTYLE); SetWindowLongPtrW(h, GWL_EXSTYLE, ex | flags); } }
+    pub fn ex_style(h: isize) -> isize { unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) } }
+}
+/// Hide a window from the taskbar / app switcher with native means. Returns false if it could not be verified.
+pub(crate) fn hide_from_taskbar(w: &WebviewWindow, no_activate: bool) {
+    let _ = w.set_skip_taskbar(true);
+    #[cfg(windows)]
+    if let Ok(h) = w.hwnd() { win::add_ex_style(h.0 as isize, win::TOOLWINDOW | if no_activate { win::NOACTIVATE } else { 0 }); }
+    #[cfg(not(windows))]
+    let _ = no_activate;
+}
+/// Windows only: true when the window carries WS_EX_TOOLWINDOW. Other platforms: `None`.
+pub(crate) fn is_tool_window(w: &WebviewWindow) -> Option<bool> {
+    #[cfg(windows)] { return w.hwnd().ok().map(|h| win::ex_style(h.0 as isize) & win::TOOLWINDOW != 0); }
+    #[cfg(not(windows))] { let _ = w; None }
+}
+
 pub(crate) const TOGGLE: &str = "toggle";
 pub(crate) const PANEL: &str = "panel";
 /// Extra transparent hit area around the drawn tab, perpendicular to the edge (dip).
@@ -24,6 +47,8 @@ pub(crate) struct AppState {
     move_gen: AtomicU64,
     ignore_moves_until: AtomicU64,
     pub(crate) panel_collapsed: AtomicBool,
+    pub(crate) panel_gen: AtomicU64,
+    pub(crate) panel_open: AtomicBool,
     topology: Mutex<String>,
     visual: Mutex<Option<Side>>,
 }
@@ -75,6 +100,30 @@ pub(crate) fn place_toggle(app: &AppHandle) {
     let _ = app.emit("toggle-visual", side);
 }
 
+/// Slide the toggle to its docked rectangle (ease-out, ~160 ms) instead of jumping. Size (orientation) changes immediately.
+fn animate_toggle(app: &AppHandle) {
+    let Some(w) = app.get_webview_window(TOGGLE) else { return };
+    let Some((to, _)) = toggle_rect_now(app) else { return };
+    let Ok(from) = w.outer_position() else { place_toggle(app); return };
+    let s = settings(app);
+    *state(app).visual.lock().unwrap_or_else(|e| e.into_inner()) = s.placement.clone().unwrap_or_default().snap.side();
+    let _ = app.emit("toggle-visual", s.placement.clone().unwrap_or_default().snap.side());
+    let _ = w.set_size(Size::Physical(PhysicalSize::new(to.w.max(1) as u32, to.h.max(1) as u32)));
+    if !s.toggle.animations { place_toggle(app); return; }
+    let (app2, w2) = (app.clone(), w.clone());
+    std::thread::spawn(move || {
+        let steps = 12u32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64; let e = 1.0 - (1.0 - t).powi(3);
+            state(&app2).ignore_moves_until.store(now_ms() + 300, SeqCst);
+            let x = from.x as f64 + (to.x - from.x) as f64 * e; let y = from.y as f64 + (to.y - from.y) as f64 * e;
+            let _ = w2.set_position(Position::Physical(PhysicalPosition::new(x.round() as i32, y.round() as i32)));
+            std::thread::sleep(Duration::from_millis(13));
+        }
+        place_toggle(&app2); // exact final rectangle
+    });
+}
+
 pub(crate) fn save(app: &AppHandle, s: Settings) -> Result<(), String> {
     let st = state(app);
     let s = s.clamped();
@@ -94,7 +143,7 @@ pub(crate) fn finish_drag(app: &AppHandle) {
         log(app, &format!("drag finished -> {:?}", p.snap));
         let mut n = s; n.placement = Some(p);
         if let Err(e) = save(app, n) { log(app, &e); }
-        place_toggle(app);
+        animate_toggle(app);
     }
 }
 
@@ -105,6 +154,7 @@ fn create_toggle(app: &AppHandle) -> Result<(), String> {
         .title("Veyra").decorations(false).transparent(true).always_on_top(s.toggle.always_on_top).skip_taskbar(true)
         .resizable(false).shadow(false).focused(false).visible(false).inner_size(w0, h0)
         .build().map_err(|e| e.to_string())?;
+    hide_from_taskbar(&w, true);
     let app2 = app.clone();
     w.on_window_event(move |ev| match ev {
         WindowEvent::Moved(_) => {
@@ -138,14 +188,16 @@ fn ensure_panel(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window(PANEL) { return Ok(w); }
     let s = settings(app);
     WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html?w=panel".into()))
-        .title("Veyra").decorations(false).transparent(true).always_on_top(s.panel_always_on_top).skip_taskbar(false)
+        .title("Veyra").decorations(false).transparent(true).always_on_top(s.panel_always_on_top).skip_taskbar(true)
         .resizable(true).min_inner_size(320.0, COMPACT_H).shadow(true).visible(false).focused(false)
         .inner_size(s.panel_width, s.panel_height).build().map_err(|e| e.to_string())
+        .map(|w| { hide_from_taskbar(&w, false); w })
 }
 
 pub(crate) fn show_panel(app: &AppHandle) {
     match ensure_panel(app) {
         Ok(w) => {
+            state(app).panel_gen.fetch_add(1, SeqCst); state(app).panel_open.store(true, SeqCst);
             state(app).panel_collapsed.store(false, SeqCst);
             place_panel(app, &w);
             if let Err(e) = w.show() { log(app, &format!("panel show failed: {e}")); }
@@ -159,11 +211,15 @@ pub(crate) fn show_panel(app: &AppHandle) {
     }
 }
 pub(crate) fn hide_panel(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window(PANEL) { let _ = w.hide(); }
-    let _ = app.emit("panel-visibility", false);
-    log(app, "panel hidden");
+    let gen = state(app).panel_gen.fetch_add(1, SeqCst) + 1; state(app).panel_open.store(false, SeqCst);
+    let _ = app.emit("panel-visibility", false); // the UI fades out for ~120 ms, then the window is hidden unless it was re-opened meanwhile
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        if state(&app2).panel_gen.load(SeqCst) == gen { if let Some(w) = app2.get_webview_window(PANEL) { let _ = w.hide(); } log(&app2, "panel hidden"); }
+    });
 }
-pub(crate) fn panel_visible(app: &AppHandle) -> bool { app.get_webview_window(PANEL).and_then(|w| w.is_visible().ok()).unwrap_or(false) }
+pub(crate) fn panel_visible(app: &AppHandle) -> bool { state(app).panel_open.load(SeqCst) && app.get_webview_window(PANEL).and_then(|w| w.is_visible().ok()).unwrap_or(false) }
 
 /// The toggle was clicked. First click opens the panel; the second follows the "second click" setting.
 pub(crate) fn toggle_clicked_impl(app: &AppHandle) {
@@ -218,7 +274,7 @@ pub fn run() {
             let dir = std::env::var_os("VEYRA_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| app.path().app_data_dir().expect("app data dir"));
             let s = Settings::load(&dir.join("settings.json"));
             app.manage::<S>(Arc::new(AppState { path: dir.join("settings.json"), log_path: dir.join("logs").join("veyra.log"), settings: RwLock::new(s),
-                move_gen: AtomicU64::new(0), ignore_moves_until: AtomicU64::new(0), panel_collapsed: AtomicBool::new(false), topology: Mutex::new(String::new()), visual: Mutex::new(None) }));
+                move_gen: AtomicU64::new(0), ignore_moves_until: AtomicU64::new(0), panel_collapsed: AtomicBool::new(false), panel_gen: AtomicU64::new(0), panel_open: AtomicBool::new(false), topology: Mutex::new(String::new()), visual: Mutex::new(None) }));
             let h = app.handle().clone();
             log(&h, "Veyra started");
             create_toggle(&h)?;
