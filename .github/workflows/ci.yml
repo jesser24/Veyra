@@ -74,7 +74,7 @@ jobs:
       - name: Check architecture (from the file header) and that it starts
         shell: bash
         run: |
-          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          EXE=$(scripts/engine-path.sh llama-out)
           node scripts/check-binary.mjs "$EXE" ${{ matrix.arch }}
           "$EXE" --help | grep -E -- "--api-key|--jinja|--ctx-size|--threads|--parallel|--no-ui|--host|--port" | head -20
       - uses: actions/upload-artifact@v4
@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           chmod +x llama-out/llama-server 2>/dev/null || true
-          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          EXE=$(scripts/engine-path.sh llama-out)
           cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model qwen3-0.6b-q8_0 --runs 2 --long --check --out bench-${{ matrix.label }}.json 2>&1 | tee bench-${{ matrix.label }}.txt
       - uses: actions/upload-artifact@v4
         if: always()

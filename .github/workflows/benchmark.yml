@@ -25,7 +25,7 @@ jobs:
       - name: Benchmark
         shell: bash
         run: |
-          EXE=$(ls llama-out/llama-server.exe llama-out/llama-server 2>/dev/null | head -1)
+          EXE=$(scripts/engine-path.sh llama-out)
           cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model "${{ inputs.model }}" --ctx "${{ inputs.ctx }}" --runs 3 --long --out bench.json | tee bench.txt
       - uses: actions/upload-artifact@v4
         if: always()

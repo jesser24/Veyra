@@ -18,7 +18,11 @@ esac
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) args+=(-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_POLICY_DEFAULT_CMP0091=NEW) ;; esac  # static CRT: no VC++ redistributable needed
 cmake -S . -B build "${args[@]}"
 cmake --build build --config Release --target llama-server -j"$( (nproc || sysctl -n hw.ncpu) 2>/dev/null || echo 2)"
-bin=$(find build -type f \( -name llama-server -o -name llama-server.exe \) | head -n1); [ -n "$bin" ] || { echo "llama-server not built"; exit 1; }
+echo "candidates:"; find build -name 'llama-server*' -not -path '*/CMakeFiles/*' | head -20
+bin=$(find build -type f -name 'llama-server.exe' | head -n1)
+[ -n "$bin" ] || bin=$(find build -type f -name 'llama-server' -not -path '*/CMakeFiles/*' | head -n1)
+[ -n "$bin" ] || { echo "llama-server not built"; exit 1; }
+echo "using $bin"
 cp "$bin" "$out/"; cp LICENSE "$out/LLAMA_CPP_LICENSE"; cp licenses/LICENSE-* "$out/" 2>/dev/null || true
 echo "$PIN_TAG $PIN_COMMIT" > "$out/LLAMA_CPP_VERSION"
 ls -la "$out"

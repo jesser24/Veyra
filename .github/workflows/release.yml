@@ -29,6 +29,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
+      - name: Build llama-server from the pinned commit and place it in the bundle resources
+        shell: bash
+        run: |
+          scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/src-tauri/resources/llama"
+          chmod +x src-tauri/resources/llama/llama-server 2>/dev/null || true
+          node scripts/check-binary.mjs "$(scripts/engine-path.sh src-tauri/resources/llama)" ${{ matrix.label == 'macos-arm64' && 'arm64' || 'x64' }}
         shell: bash
       - name: Check the tag matches the app version
         shell: bash
