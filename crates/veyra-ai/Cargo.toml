@@ -6,6 +6,7 @@ description = "Local AI for Veyra: hardware detection, model catalog and recomme
 
 [dependencies]
 veyra-net = { path = "../veyra-net" }
+veyra-llama = { path = "../veyra-llama" }
 sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -19,10 +20,6 @@ reqwest = { version = "0.12", default-features = false }
 veyra-net = { path = "../veyra-net", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process"] }
-
-[[bin]]
-name = "fake-llama-server"
-path = "src/bin/fake_llama_server.rs"
 
 [[bin]]
 name = "veyra-bench"

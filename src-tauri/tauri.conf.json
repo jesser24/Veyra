@@ -42,9 +42,6 @@
     },
     "macOS": {
       "minimumSystemVersion": "12.0"
-    },
-    "resources": [
-      "resources/llama/*"
-    ]
+    }
   }
 }

@@ -1,10 +1,12 @@
 //! Encrypted local storage. Nothing here touches the network.
-//! Key hierarchy: master password --Argon2id--> KEK --wraps--> DEK (random, 32 bytes) --HKDF--> database key and attachment key.
+//! Two key modes. System mode (default, no password): random DEK in the OS credential store, see system_key.rs. Legacy password mode below.
+//! Key hierarchy (password mode): master password --Argon2id--> KEK --wraps--> DEK (random, 32 bytes) --HKDF--> database key and attachment key.
 //! A recovery key wraps the same DEK, so changing the password never re-encrypts data. Lose both and the data is unrecoverable.
 pub mod backup;
 pub mod crypto;
 pub mod db;
 pub mod vault;
+pub mod system_key;
 
 #[derive(Debug)]
 pub enum Error { Crypto(String), WrongSecret, Io(std::io::Error), Db(String), Format(String), NotFound(String), Integrity(String) }

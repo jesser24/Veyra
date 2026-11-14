@@ -30,12 +30,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
         shell: bash
-      - name: Build llama-server from the pinned commit and place it in the bundle resources
+      - name: Build libllama from the pinned commit (linked statically into Veyra)
         shell: bash
         run: |
-          scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/src-tauri/resources/llama"
-          chmod +x src-tauri/resources/llama/llama-server 2>/dev/null || true
-          node scripts/check-binary.mjs "$(scripts/engine-path.sh src-tauri/resources/llama)" ${{ matrix.label == 'macos-arm64' && 'arm64' || 'x64' }}
+          scripts/build-libllama.sh "$RUNNER_TEMP/llama-work" "$PWD/libllama"
+          echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
       - name: Windows only - use Strawberry Perl for the vendored OpenSSL build (Git's MSYS perl lacks modules)
         if: runner.os == 'Windows'
         shell: bash

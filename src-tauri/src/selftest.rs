@@ -19,13 +19,11 @@ pub fn spawn(app: AppHandle) {
         let m = ms.first().cloned();
         let t = app.get_webview_window(TOGGLE);
         check("toggle window exists", t.is_some(), String::new());
-        // the engine shipped inside THIS installation must exist and start (architecture mismatch / missing file / missing DLL all fail here)
-        match crate::ai::engine_binary(&app) {
-            Some(bin) => { let r = std::process::Command::new(&bin).arg("--version").output();
-                let (ok, d) = match r { Ok(o) => (o.status.success(), format!("{} {}", String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or(""), String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or(""))), Err(e) => (false, e.to_string()) };
-                check("bundled llama-server starts (--version)", ok, format!("{} {d}", bin.display())); }
-            None => check("bundled llama-server starts (--version)", false, "llama-server not found in the installation resources".into()),
-        }
+        // the inference library is linked INTO this executable: no engine file to ship, no child process
+        check("inference library linked in-process", !veyra_llama::IS_STUB, veyra_llama::version());
+        { let me = std::process::id(); let mut sys = sysinfo::System::new(); sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+          let kids: Vec<String> = sys.processes().values().filter(|p| p.parent().map(|x| x.as_u32()) == Some(me)).map(|p| p.name().to_string_lossy().into_owned()).collect();
+          check("no child process of the Veyra process (no llama-server)", !kids.iter().any(|n| n.to_lowercase().contains("llama")), format!("children: {kids:?}")); }
         if let (Some(m), Some(t)) = (m.clone(), t.clone()) {
             let snaps = [("left", Snap::Edge(Side::Left)), ("right", Snap::Edge(Side::Right)), ("top", Snap::Edge(Side::Top)), ("bottom", Snap::Edge(Side::Bottom)),
                 ("top-left", Snap::Corner(Corner::TopLeft)), ("top-right", Snap::Corner(Corner::TopRight)), ("bottom-left", Snap::Corner(Corner::BottomLeft)), ("bottom-right", Snap::Corner(Corner::BottomRight)), ("free", Snap::Free)];

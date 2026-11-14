@@ -40,15 +40,55 @@ impl ToggleSettings {
     }
 }
 
+/// Local-AI preferences, shared by the chat window and the full application (one source of truth).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct AiSettings {
+    /// Catalog id of the model to use; set when the user loads a model. `None` = nothing selected yet.
+    pub model_id: Option<String>,
+    /// Load the selected (downloaded and SHA-256-verified) model when Veyra starts.
+    pub auto_load: bool,
+    /// Unload the model after this many idle minutes. `None` (default) = never.
+    pub idle_unload_minutes: Option<u32>,
+    /// Reasoning: "off" (fast, default), "on" (the model thinks before answering; slower).
+    pub thinking: String,
+    /// Context size in tokens; `None` = automatic (4096 on CPU-only machines, 8192 on Apple Silicon).
+    pub ctx: Option<u32>,
+    /// Generation threads; `None` = automatic (physical cores).
+    pub threads: Option<u32>,
+    pub batch: u32,
+    /// "auto" | "on" | "off"
+    pub flash_attention: String,
+    /// Store the KV cache as 8-bit (about half the memory, tiny quality cost).
+    pub kv_cache_q8: bool,
+    /// Maximum tokens per reply.
+    pub max_reply_tokens: u32,
+    /// Show the engine's performance figures in the AI section of the application (never in the chat).
+    pub show_performance: bool,
+}
+impl Default for AiSettings {
+    fn default() -> Self { Self { model_id: None, auto_load: true, idle_unload_minutes: None, thinking: "off".into(), ctx: None, threads: None, batch: 512, flash_attention: "auto".into(), kv_cache_q8: false, max_reply_tokens: 1024, show_performance: true } }
+}
+impl AiSettings {
+    pub fn clamped(mut self) -> Self {
+        self.batch = self.batch.clamp(64, 4096); self.max_reply_tokens = self.max_reply_tokens.clamp(16, 8192);
+        self.ctx = self.ctx.map(|c| c.clamp(1024, 32768)); self.threads = self.threads.map(|t| t.clamp(1, 64)); self.idle_unload_minutes = self.idle_unload_minutes.map(|m| m.clamp(1, 24 * 60));
+        if !matches!(self.thinking.as_str(), "off" | "on") { self.thinking = "off".into(); } if !matches!(self.flash_attention.as_str(), "auto" | "on" | "off") { self.flash_attention = "auto".into(); } self
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     pub theme: Theme, pub toggle: ToggleSettings, pub placement: Option<Placement>,
     pub panel_width: f64, pub panel_height: f64, pub panel_always_on_top: bool,
     pub autostart: bool, // opt-in, off by default
+    pub ai: AiSettings,
+    /// Set once the first-run installation step has been completed (see docs/SECURITY.md: it is NOT a security boundary).
+    pub setup_done: bool,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { theme: Theme::System, toggle: ToggleSettings::default(), placement: None, panel_width: 420.0, panel_height: 620.0, panel_always_on_top: false, autostart: false } }
+    fn default() -> Self { Self { theme: Theme::System, toggle: ToggleSettings::default(), placement: None, panel_width: 420.0, panel_height: 620.0, panel_always_on_top: false, autostart: false, ai: AiSettings::default(), setup_done: false } }
 }
 impl Settings {
     pub fn clamped(mut self) -> Self {
@@ -56,6 +96,7 @@ impl Settings {
         let f = |v: f64, lo: f64, hi: f64, d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
         self.panel_width = f(self.panel_width, 320.0, 1400.0, 420.0);
         self.panel_height = f(self.panel_height, 360.0, 1200.0, 620.0);
+        self.ai = self.ai.clamped();
         self
     }
     /// Missing or corrupt file -> defaults. A corrupt file is renamed to `<name>.corrupt` instead of being silently overwritten.
@@ -104,5 +145,15 @@ mod tests {
         let d = dir(); let p = d.join("settings.json"); fs::write(&p, "{ not json").unwrap();
         assert_eq!(Settings::load(&p), Settings::default());
         assert!(d.join("settings.json.corrupt").exists());
+    }
+}
+
+#[cfg(test)]
+mod ai_tests {
+    use super::*;
+    #[test] fn old_settings_files_load_with_ai_defaults_and_ai_values_are_clamped() {
+        let s: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap(); assert!(s.ai.auto_load && s.ai.idle_unload_minutes.is_none() && s.ai.thinking == "off");
+        let mut s = Settings::default(); s.ai.ctx = Some(10); s.ai.threads = Some(0); s.ai.thinking = "weird".into(); s.ai.idle_unload_minutes = Some(0); s.ai.max_reply_tokens = 99999;
+        let c = s.clamped(); assert_eq!((c.ai.ctx, c.ai.threads, c.ai.idle_unload_minutes, c.ai.max_reply_tokens), (Some(1024), Some(1), Some(1), 8192)); assert_eq!(c.ai.thinking, "off");
     }
 }

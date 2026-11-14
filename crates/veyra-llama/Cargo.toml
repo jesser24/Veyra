@@ -1,0 +1,12 @@
+[package]
+name = "veyra-llama"
+version = "0.1.0"
+edition = "2021"
+description = "In-process llama.cpp (libllama) binding: a tiny C++ shim over the pinned llama.cpp static libraries + a safe Rust wrapper. No server process, no HTTP."
+build = "build.rs"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"

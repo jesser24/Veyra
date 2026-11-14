@@ -10,6 +10,9 @@ struct VaultFile { version: u32, kdf: KdfParams, salt: String, wrapped_by_passwo
 /// The unlocked data-encryption key. Zeroised when dropped.
 pub struct Unlocked { dek: Key }
 impl Unlocked {
+    /// Wraps an existing data-encryption key (used by the system-protected key mode).
+    pub fn from_dek(dek: Key) -> Unlocked { Unlocked { dek } }
+    pub(crate) fn dek_bytes(&self) -> [u8; 32] { self.dek.0 }
     pub fn db_key(&self) -> Key { crypto::subkey(&self.dek, "veyra/db/v1") }
     pub fn file_key(&self) -> Key { crypto::subkey(&self.dek, "veyra/files/v1") }
 }

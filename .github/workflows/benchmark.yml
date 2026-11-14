@@ -19,14 +19,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      - name: Build llama-server from the pinned commit
-        shell: bash
-        run: scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/llama-out"
-      - name: Benchmark
+      - name: Build libllama from the pinned commit
         shell: bash
         run: |
-          EXE=$(scripts/engine-path.sh llama-out)
-          cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model "${{ inputs.model }}" --ctx "${{ inputs.ctx }}" --runs 3 --long --out bench.json | tee bench.txt
+          scripts/build-libllama.sh "$RUNNER_TEMP/llama-work" "$PWD/libllama"
+          echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
+      - name: Benchmark
+        shell: bash
+        run: cargo run --release --locked -p veyra-ai --bin veyra-bench -- --dir "$RUNNER_TEMP/models" --model "${{ inputs.model }}" --ctx "${{ inputs.ctx }}" --runs 3 --long --out bench.json | tee bench.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: "benchmark-${{ matrix.label }}", path: "bench.*" }

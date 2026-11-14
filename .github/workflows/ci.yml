@@ -37,24 +37,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p veyra-core -p veyra-store -p veyra-net -p veyra-ai --locked
+      - run: cargo test -p veyra-core -p veyra-store -p veyra-net -p veyra-ai -p veyra-llama --locked
 
   engine-cross-os:
     name: Net + AI engine tests (${{ matrix.os }})
+    needs: [libllama]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-15, macos-15-intel]
+        include:
+          - { label: windows-x64, os: windows-2022 }
+          - { label: macos-arm64, os: macos-15 }
+          - { label: macos-x64, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      # process supervision, loopback streaming, cancellation and resumable download behave differently per OS: test on each
-      - run: cargo test -p veyra-net -p veyra-ai --locked
+      - uses: actions/download-artifact@v4
+        with: { name: "libllama-${{ matrix.label }}", path: libllama }
+      - name: Point the build at the inference library built from the pinned llama.cpp commit
+        shell: bash
+        run: echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
+      # the native binding (libllama linked statically), the gateway and the resumable download behave differently per OS: test on each
+      - run: cargo test -p veyra-net -p veyra-ai -p veyra-llama --locked
 
-  llama:
-    name: llama-server b12336 (${{ matrix.label }})
+  libllama:
+    name: libllama b12336, static (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -66,25 +75,20 @@ jobs:
           - { label: macos-x64, os: macos-15-intel, arch: x64 }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "${{ env.NODE_VERSION }}" }
-      - name: Build llama-server from the pinned commit (no prebuilt binary is downloaded)
+      - name: Build libllama from the pinned commit as static libraries (no prebuilt binary is downloaded)
         shell: bash
-        run: scripts/build-llama-server.sh "$RUNNER_TEMP/llama-work" "$PWD/llama-out"
-      - name: Check architecture (from the file header) and that it starts
+        run: scripts/build-libllama.sh "$RUNNER_TEMP/llama-work" "$PWD/libllama"
+      - name: List what was built
         shell: bash
-        run: |
-          EXE=$(scripts/engine-path.sh llama-out)
-          node scripts/check-binary.mjs "$EXE" ${{ matrix.arch }}
-          "$EXE" --help | grep -E -- "--api-key|--jinja|--ctx-size|--threads|--parallel|--no-ui|--host|--port" | head -20
+        run: find libllama -maxdepth 2 -type f | head -50
       - uses: actions/upload-artifact@v4
-        with: { name: "llama-${{ matrix.label }}", path: llama-out/, if-no-files-found: error }
+        with: { name: "libllama-${{ matrix.label }}", path: libllama/, if-no-files-found: error }
 
   real-inference:
-    # REAL inference: the real llama-server built above + a real model downloaded through Veyra's own gateway (official Hugging Face URL, SHA-256 checked).
+    # REAL inference: the real libllama linked into Veyra's own process, built above + a real model downloaded through Veyra's own gateway (official Hugging Face URL, SHA-256 checked).
     # Qwen3-0.6B is used because it is small enough for a CI runner; it proves the whole pipeline, not the speed of the recommended 4B model.
     name: Real inference, Qwen3-0.6B (${{ matrix.label }})
-    needs: [llama]
+    needs: [libllama]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -99,20 +103,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v4
-        with: { name: "llama-${{ matrix.label }}", path: llama-out }
-      - name: Run the benchmark with --check (download, load, stream, cancel, long prompt, unload/reload)
+        with: { name: "libllama-${{ matrix.label }}", path: libllama }
+      - name: Point the build at the inference library built from the pinned llama.cpp commit
         shell: bash
-        run: |
-          chmod +x llama-out/llama-server 2>/dev/null || true
-          EXE=$(scripts/engine-path.sh llama-out)
-          cargo run --release --locked -p veyra-ai --bin veyra-bench -- --server "$PWD/$EXE" --dir "$RUNNER_TEMP/models" --model qwen3-0.6b-q8_0 --runs 2 --long --check --out bench-${{ matrix.label }}.json 2>&1 | tee bench-${{ matrix.label }}.txt
+        run: echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
+      - name: Run the benchmark with --check (download, load, stream, cancel, long prompt, unload/reload, no child process)
+        shell: bash
+        run: cargo run --release --locked -p veyra-ai --bin veyra-bench -- --dir "$RUNNER_TEMP/models" --model qwen3-0.6b-q8_0 --runs 2 --long --check --out bench-${{ matrix.label }}.json 2>&1 | tee bench-${{ matrix.label }}.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: "bench-${{ matrix.label }}", path: "bench-${{ matrix.label }}.*", if-no-files-found: warn }
 
   bundle:
     name: Bundle ${{ matrix.label }}
-    needs: [web, core, llama]
+    needs: [web, core, libllama]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -135,10 +139,10 @@ jobs:
       - run: npm ci
         shell: bash
       - uses: actions/download-artifact@v4
-        with: { name: "llama-${{ matrix.label }}", path: src-tauri/resources/llama }
-      - name: Make the engine executable (artifact download drops the mode bit)
-        if: matrix.platform == 'macos'
-        run: chmod +x src-tauri/resources/llama/llama-server
+        with: { name: "libllama-${{ matrix.label }}", path: libllama }
+      - name: Point the build at the inference library built from the pinned llama.cpp commit
+        shell: bash
+        run: echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
       - name: Windows only - use Strawberry Perl for the vendored OpenSSL build (Git's MSYS perl lacks modules)
         if: runner.os == 'Windows'
         shell: bash

@@ -274,8 +274,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _a, _c| { let h = app.clone(); std::thread::spawn(move || show_panel(&h)); }))
         .invoke_handler(tauri::generate_handler![get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd,
-            net_summary, net_entries, net_clear, ai::ai_overview, ai::ai_download, ai::ai_download_cancel, ai::ai_verify, ai::ai_delete_model, ai::ai_load, ai::ai_unload, ai::ai_status, ai::ai_cancel, ai::ai_test,
-            ai::vault_status, ai::vault_create, ai::vault_unlock, ai::vault_unlock_recovery, ai::vault_lock, ai::conv_list, ai::conv_messages, ai::conv_create, ai::conv_rename, ai::conv_archive, ai::conv_trash, ai::conv_restore, ai::conv_delete_permanently, ai::chat_send])
+            net_summary, net_entries, net_clear, ai::ai_overview, ai::ai_download, ai::ai_download_cancel, ai::ai_verify, ai::ai_delete_model, ai::ai_load, ai::ai_unload, ai::ai_state, ai::ai_cancel, ai::ai_test,
+            ai::security_status, ai::key_export, ai::backup_create, ai::backup_list, ai::setup_complete, ai::conv_list, ai::conv_messages, ai::conv_create, ai::conv_rename, ai::conv_archive, ai::conv_trash, ai::conv_restore, ai::conv_delete_permanently, ai::chat_send])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory); // toggle-only app: no Dock icon
@@ -287,8 +287,8 @@ pub fn run() {
             app.manage(aiq);
             let h = app.handle().clone();
             log(&h, "Veyra started");
-            // an engine left running by a crash would hold gigabytes of RAM: end it before anything else starts
-            if let Some(bin) = ai::engine_binary(&h) { if veyra_ai::engine::reap_orphans(&dir.join("models"), &bin) { log(&h, "ended an inference engine left over from a previous run"); } }
+            // inference runs inside this process: nothing to reap; open the encrypted store (OS-protected key, no password) and load the selected model in the background
+            { let ai = h.state::<Arc<ai::Ai>>().inner().clone(); let (h2, ai2) = (h.clone(), ai.clone()); std::thread::spawn(move || { ai::open_store(&h2, &ai2); ai::auto_load(&h2, &ai2); ai::start_idle_watcher(&h2, &ai2); }); }
             create_toggle(&h)?;
             // Display changes (plug/unplug, resolution, wake from sleep): cheap local comparison every 3 s. No network, no OS hooks needed.
             let hw = h.clone();
@@ -305,8 +305,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Veyra")
         .run(|app, ev| {
-            if let tauri::RunEvent::Exit = ev { // the engine child must never outlive Veyra
-                if let Some(ai) = app.try_state::<Arc<ai::Ai>>() { let ai = ai.inner().clone(); tauri::async_runtime::block_on(ai::shutdown(&ai)); }
+            if let tauri::RunEvent::Exit = ev { // free the model before the process ends
+                if let Some(ai) = app.try_state::<Arc<ai::Ai>>() { let ai = ai.inner().clone(); ai::shutdown(&ai); }
             }
             // Closing every window must not quit: Veyra lives in the toggle.
             if let tauri::RunEvent::ExitRequested { api, code, .. } = ev { if code.is_none() { api.prevent_exit(); } }

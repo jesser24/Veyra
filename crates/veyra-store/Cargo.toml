@@ -15,3 +15,10 @@ getrandom = "0.3"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The data key is protected by the operating system's own credential store (Windows Credential Manager, which uses DPAPI; macOS Keychain).
+# No password is ever asked. On other systems (development/CI on Linux) a file readable only by the user is used and reported as such.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
