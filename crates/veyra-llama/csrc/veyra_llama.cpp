@@ -96,7 +96,8 @@ int32_t veyra_generate(veyra_engine* e, const char* prompt, int32_t plen, const 
         auto tp = std::chrono::steady_clock::now();
         for (size_t i = common; i < toks.size();) {
             if (cancelled()) { if (st) st->prefill_ms = ms_since(tp); return 1; }
-            int32_t k = (int32_t)std::min<size_t>((size_t)e->n_batch, toks.size() - i);
+            // prompt is fed in chunks of at most 128 tokens so that a cancel request is noticed within ~1 s even on a slow CPU (cost: negligible)
+            int32_t k = (int32_t)std::min<size_t>((size_t)std::min<int32_t>(e->n_batch, 128), toks.size() - i);
             llama_batch b = llama_batch_get_one(toks.data() + i, k);
             if (llama_decode(e->ctx, b) != 0) { e->cache.clear(); llama_memory_clear(mem, true); set_err(err, errlen, "decoding the prompt failed. " + tail()); return -3; }
             e->cache.insert(e->cache.end(), toks.begin() + i, toks.begin() + i + k); i += (size_t)k;
