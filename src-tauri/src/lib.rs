@@ -36,6 +36,7 @@ pub(crate) fn is_tool_window(w: &WebviewWindow) -> Option<bool> {
 
 pub(crate) const TOGGLE: &str = "toggle";
 pub(crate) const PANEL: &str = "panel";
+pub(crate) const APP: &str = "app";
 /// Extra transparent hit area around the drawn tab, perpendicular to the edge (dip).
 const HIT_EXTRA: f64 = 14.0;
 pub(crate) const COMPACT_H: f64 = 64.0;
@@ -177,21 +178,51 @@ fn create_toggle(app: &AppHandle) -> Result<(), String> {
 
 fn panel_size(s: &Settings, collapsed: bool) -> (f64, f64) { (s.panel_width, if collapsed { COMPACT_H } else { s.panel_height }) }
 
+/// Saves without broadcasting (used for geometry that no UI displays).
+fn save_quiet(app: &AppHandle, st: Settings) -> Result<(), String> { let st = st.clamped(); let a = state(app); st.save(&a.path).map_err(|e| e.to_string())?; *a.settings.write().unwrap_or_else(|e| e.into_inner()) = st; Ok(()) }
+
+static PENDING_OPEN: Mutex<Option<String>> = Mutex::new(None);
+/// Lets the application window open a conversation in the chat window (the same stored conversation; nothing is copied).
+#[tauri::command] async fn open_chat(app: AppHandle, conversation: Option<String>) -> Result<(), String> {
+    *PENDING_OPEN.lock().unwrap_or_else(|e| e.into_inner()) = conversation.clone(); show_panel(&app); let _ = app.emit("open-conversation", conversation); Ok(())
+}
+#[tauri::command] async fn take_pending_open() -> Option<String> { PENDING_OPEN.lock().unwrap_or_else(|e| e.into_inner()).take() }
+
+/// The full application window: same process, same backend state, same design system as the chat. Async: window creation from a sync command can deadlock on Windows.
+#[tauri::command] async fn open_app(app: AppHandle, section: Option<String>) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(APP) { let _ = w.unminimize(); let _ = w.show(); let _ = w.set_focus(); if let Some(sec) = section { let _ = app.emit("app-section", sec); } return Ok(()); }
+    let url = match &section { Some(sec) => format!("index.html?w=app&section={sec}"), None => "index.html?w=app".into() };
+    WebviewWindowBuilder::new(&app, APP, WebviewUrl::App(url.into())).title("Veyra").inner_size(1080.0, 720.0).min_inner_size(760.0, 520.0).center().resizable(true).visible(true).focused(true).disable_drag_drop_handler()
+        .build().map_err(|e| e.to_string())?; log(&app, "application window opened"); Ok(())
+}
+
 pub(crate) fn place_panel(app: &AppHandle, w: &WebviewWindow) {
     let s = settings(app);
     let Some((tr, m)) = toggle_rect_now(app) else { return };
     let (pw, ph) = panel_size(&s, state(app).panel_collapsed.load(SeqCst));
-    set_rect(w, geometry::panel_rect(tr, pw, ph, 8.0, &m));
+    let collapsed = state(app).panel_collapsed.load(SeqCst);
+    let _ = w.set_min_size(Some(Size::Logical(tauri::LogicalSize::new(PANEL_MIN_W, if collapsed { COMPACT_H } else { PANEL_MIN_H })))); // a coherent minimum: below it the layout could not keep the input usable
+    set_rect(w, geometry::panel_rect(tr, pw.max(PANEL_MIN_W), ph.max(if collapsed { COMPACT_H } else { PANEL_MIN_H }), 8.0, &m));
 }
+pub(crate) const PANEL_MIN_W: f64 = 340.0;
+pub(crate) const PANEL_MIN_H: f64 = 420.0;
 
 fn ensure_panel(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window(PANEL) { return Ok(w); }
     let s = settings(app);
     WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html?w=panel".into()))
         .title("Veyra").decorations(false).transparent(true).always_on_top(s.panel_always_on_top).skip_taskbar(true)
-        .resizable(true).min_inner_size(320.0, COMPACT_H).shadow(true).visible(false).focused(false)
+        .resizable(true).min_inner_size(PANEL_MIN_W, COMPACT_H).shadow(true).visible(false).focused(false).disable_drag_drop_handler() // HTML5 drops give the page real File objects
         .inner_size(s.panel_width, s.panel_height).build().map_err(|e| e.to_string())
-        .map(|w| { hide_from_taskbar(&w, false); w })
+        .map(|w| { hide_from_taskbar(&w, false);
+            // remember the size the user chose (debounced); never while collapsed to the bar
+            let (a, w2) = (app.clone(), w.clone());
+            w.on_window_event(move |ev| if let WindowEvent::Resized(sz) = ev { if state(&a).panel_collapsed.load(SeqCst) { return; }
+                let g = state(&a).panel_gen.load(SeqCst); let (a2, w3, sz) = (a.clone(), w2.clone(), *sz);
+                std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(500)); if state(&a2).panel_gen.load(SeqCst) != g || state(&a2).panel_collapsed.load(SeqCst) { return; }
+                    let f = w3.scale_factor().unwrap_or(1.0); let (lw, lh) = (sz.width as f64 / f, sz.height as f64 / f); let mut st = settings(&a2);
+                    if (st.panel_width - lw).abs() > 1.0 || (st.panel_height - lh).abs() > 1.0 { st.panel_width = lw; st.panel_height = lh; let _ = save_quiet(&a2, st); } }); });
+            w })
 }
 
 pub(crate) fn show_panel(app: &AppHandle) {
@@ -273,9 +304,9 @@ mod ai;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _a, _c| { let h = app.clone(); std::thread::spawn(move || show_panel(&h)); }))
-        .invoke_handler(tauri::generate_handler![get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd,
+        .invoke_handler(tauri::generate_handler![open_app, open_chat, take_pending_open, get_settings, toggle_visual, log_ui, update_settings, reset_toggle_position, toggle_clicked, quit_app, hide_panel_cmd,
             net_summary, net_entries, net_clear, ai::ai_overview, ai::ai_download, ai::ai_download_cancel, ai::ai_verify, ai::ai_delete_model, ai::ai_load, ai::ai_unload, ai::ai_state, ai::ai_cancel, ai::ai_test,
-            ai::security_status, ai::key_export, ai::backup_create, ai::backup_list, ai::setup_complete, ai::conv_list, ai::conv_messages, ai::conv_create, ai::conv_rename, ai::conv_archive, ai::conv_trash, ai::conv_restore, ai::conv_delete_permanently, ai::chat_send])
+            ai::security_status, ai::key_export, ai::backup_create, ai::backup_list, ai::backup_verify, ai::backup_restore, ai::key_import, ai::setup_complete, ai::attach_stage, ai::attach_discard, ai::conv_attachments, ai::attachment_data, ai::staged_data, ai::conv_list, ai::conv_messages, ai::conv_create, ai::conv_rename, ai::conv_archive, ai::conv_trash, ai::conv_restore, ai::conv_delete_permanently, ai::chat_send])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory); // toggle-only app: no Dock icon

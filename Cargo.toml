@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/veyra-core", "crates/veyra-store", "crates/veyra-net", "crates/veyra-llama", "crates/veyra-ai", "src-tauri"]
+members = ["crates/veyra-core", "crates/veyra-store", "crates/veyra-net", "crates/veyra-llama", "crates/veyra-docs", "crates/veyra-ai", "src-tauri"]
 
 [profile.release]
 opt-level = "s"
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind" # document parsers must be able to fail without taking the app down (catch_unwind)
 strip = true

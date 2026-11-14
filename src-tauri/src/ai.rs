@@ -20,16 +20,17 @@ use veyra_ai::hardware;
 use veyra_ai::installed::{self, FileState};
 use veyra_net::{Config, NetClient};
 use veyra_store::crypto::KdfParams;
-use veyra_store::db::{Conversation, Message, Store, View};
+use veyra_store::db::{AttachmentMeta, AttachmentRow, Conversation, Message, Store, View};
 use veyra_store::system_key::{self, KeyStore};
 
 pub struct Ai {
     pub net: NetClient, pub data: PathBuf, models: PathBuf,
     engine: Std<Option<Engine>>, loaded: Std<Option<String>>, base_status: Std<Option<Status>>, loading: AtomicBool, last_error: Std<Option<String>>,
     dl_cancel: Std<Option<Arc<AtomicBool>>>, gen_cancel: Std<Option<Arc<AtomicBool>>>, busy_dl: AtomicBool, last_activity: AtomicU64,
-    store: Std<Option<Store>>, key_kind: Std<&'static str>, store_error: Std<Option<String>>, last_perf: Std<Option<Perf>>, tok_cache: Std<HashMap<u64, usize>>,
+    staged: Std<HashMap<String, Staged>>, store: Std<Option<Store>>, key_kind: Std<&'static str>, store_error: Std<Option<String>>, last_perf: Std<Option<Perf>>, tok_cache: Std<HashMap<u64, usize>>,
 }
 type A<'a> = State<'a, Arc<Ai>>;
+struct Staged { name: String, mime: String, bytes: Vec<u8>, ex: veyra_docs::Extracted }
 fn lk<T>(m: &Std<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
 impl Ai {
@@ -37,7 +38,7 @@ impl Ai {
         let net = NetClient::new(Config::default()).map_err(|e| format!("network gateway: {e:?}"))?;
         let models = data.join("models"); let _ = std::fs::create_dir_all(&models);
         Ok(Ai { net, data, models, engine: Std::new(None), loaded: Std::new(None), base_status: Std::new(None), loading: AtomicBool::new(false), last_error: Std::new(None), dl_cancel: Std::new(None), gen_cancel: Std::new(None), busy_dl: AtomicBool::new(false), last_activity: AtomicU64::new(now_s() as u64),
-            store: Std::new(None), key_kind: Std::new("none"), store_error: Std::new(None), last_perf: Std::new(None), tok_cache: Std::new(HashMap::new()) })
+            staged: Std::new(HashMap::new()), store: Std::new(None), key_kind: Std::new("none"), store_error: Std::new(None), last_perf: Std::new(None), tok_cache: Std::new(HashMap::new()) })
     }
     fn store_dir(&self) -> PathBuf { self.data.join("store") }
     fn with_store<T>(&self, f: impl FnOnce(&Store) -> veyra_store::Result<T>) -> Result<T, String> {
@@ -209,7 +210,7 @@ pub fn open_store(app: &AppHandle, ai: &Arc<Ai>) {
 }
 #[derive(Serialize)] pub struct BackupInfo { name: String, bytes: u64, modified: i64 }
 #[tauri::command] pub async fn backup_create(ai: A<'_>) -> Result<String, String> {
-    let a = ai.inner().clone(); spawn_blocking(move || { let dir = a.data.join("backups"); let p = a.with_store(|st| veyra_store::backup::create(st, &a.data, &dir, now_s()))?;
+    let a = ai.inner().clone(); spawn_blocking(move || { let dir = a.data.join("backups"); let _ = std::fs::create_dir_all(&dir); let p = a.with_store(|st| veyra_store::backup::create(st, &a.store_dir(), &dir, now_s()))?;
         let _ = veyra_store::backup::prune(&dir, now_s(), 90, 20, 2 << 30); Ok(p.display().to_string()) }).await.map_err(s)?
 }
 #[tauri::command] pub async fn backup_list(ai: A<'_>) -> Result<Vec<BackupInfo>, String> {
@@ -218,6 +219,44 @@ pub fn open_store(app: &AppHandle, ai: &Arc<Ai>) {
     v.sort_by(|a, b| b.modified.cmp(&a.modified)); Ok(v)
 }
 fn dir_size(p: &std::path::Path) -> u64 { std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| e.metadata().map(|m| if m.is_dir() { dir_size(&e.path()) } else { m.len() }).unwrap_or(0)).sum()).unwrap_or(0) }
+
+
+fn backup_dir_of(a: &Ai, name: &str) -> Result<PathBuf, String> {
+    if !name.starts_with("veyra-backup-") || name.contains(['/', '\\']) || name.contains("..") { return Err("invalid backup name".into()); } let p = a.data.join("backups").join(name); if p.is_dir() { Ok(p) } else { Err("backup not found".into()) }
+}
+#[tauri::command] pub async fn backup_verify(ai: A<'_>, name: String) -> Result<(), String> { let p = backup_dir_of(&ai, &name)?; spawn_blocking(move || veyra_store::backup::verify(&p).map_err(s)).await.map_err(s)? }
+/// Replaces the live data with a backup. The current data is never deleted: it is moved to `store.before-restore-<time>`.
+/// The backup must have been made with THIS computer's key (or a key imported with `key_import`): otherwise it is refused before anything is touched.
+#[tauri::command] pub async fn backup_restore(app: AppHandle, ai: A<'_>, name: String) -> Result<String, String> {
+    let a = ai.inner().clone(); let src = backup_dir_of(&a, &name)?; if lk(&a.gen_cancel).is_some() { return Err("Wait for the current reply to finish first.".into()); }
+    let app2 = app.clone();
+    let r = spawn_blocking(move || {
+        let ks = system_key::default_store("app.veyra.desktop", &a.data.join("keys").join("data.key")); let (u, _) = system_key::open_or_create(ks.as_ref()).map_err(s)?;
+        let sd = a.store_dir(); let aside = a.data.join(format!("store.before-restore-{}", now_s()));
+        *lk(&a.store) = None; // closes the database before the folder is moved
+        if sd.exists() { std::fs::rename(&sd, &aside).map_err(|e| format!("cannot set the current data aside: {e}"))?; }
+        match veyra_store::backup::restore_with_key(&src, &sd, &u) {
+            Ok(_) => { let st = Store::open(&sd, &u).map_err(s)?; *lk(&a.store) = Some(st); *lk(&a.store_error) = None; Ok(aside.display().to_string()) }
+            Err(e) => { let _ = std::fs::remove_dir_all(&sd); if aside.exists() { let _ = std::fs::rename(&aside, &sd); } if let Ok(st) = Store::open(&sd, &u) { *lk(&a.store) = Some(st); }
+                Err(match e { veyra_store::Error::Integrity(m) => format!("The backup is damaged: {m}"), e => format!("The backup could not be opened with this computer's key ({e}). If it comes from another computer, import that computer's key export first (Security).") }) }
+        }
+    }).await.map_err(s)?;
+    let _ = app2.emit("store-ready", ()); let _ = app2.emit("conversations-changed", ()); r
+}
+/// Imports a key export made on another computer so that its backups can be restored here. Only allowed while this computer holds no conversations of its own,
+/// because replacing the key would make them unreadable.
+#[tauri::command] pub async fn key_import(app: AppHandle, ai: A<'_>, bundle: String, passphrase: String) -> Result<(), String> {
+    let a = ai.inner().clone();
+    let r = spawn_blocking(move || {
+        let imported = system_key::import_key(&bundle, &passphrase).map_err(|e| match e { veyra_store::Error::WrongSecret => "Wrong passphrase, or the file was altered.".to_string(), e => e.to_string() })?;
+        let has_data = { let g = lk(&a.store); match g.as_ref() { Some(st) => [View::Active, View::Archived, View::Trash].into_iter().any(|v| st.list(v, None).map(|l| !l.is_empty()).unwrap_or(true)), None => false } };
+        if has_data { return Err("This computer already has conversations protected by its own key; importing another key would make them unreadable. Export this computer's key first, or start from an empty Veyra.".to_string()); }
+        let ks = system_key::default_store("app.veyra.desktop", &a.data.join("keys").join("data.key")); system_key::adopt(ks.as_ref(), &imported).map_err(s)?;
+        *lk(&a.store) = None; let sd = a.store_dir(); if sd.exists() { let _ = std::fs::rename(&sd, a.data.join(format!("store.before-import-{}", now_s()))); }
+        let st = Store::open(&sd, &imported).map_err(s)?; *lk(&a.store) = Some(st); *lk(&a.store_error) = None; Ok(())
+    }).await.map_err(s)?;
+    let _ = app.emit("store-ready", ()); r
+}
 
 /// First-run installation step. `Veyra@2024` is an installation/configuration key chosen by the project owner. It is compared by SHA-256 only to avoid storing it in
 /// clear, but any universal key shipped inside an application can be extracted: it is NOT a licence system and NOT a cryptographic protection, and it is never used to
@@ -242,6 +281,43 @@ fn install_key_ok(input: &str) -> bool { veyra_store::crypto::sha256_hex(input.t
 #[tauri::command] pub async fn conv_restore(app: AppHandle, ai: A<'_>, id: String) -> Result<(), String> { ai.with_store(|st| st.restore(&id))?; let _ = app.emit("conversations-changed", ()); Ok(()) }
 #[tauri::command] pub async fn conv_delete_permanently(app: AppHandle, ai: A<'_>, id: String) -> Result<(), String> { ai.with_store(|st| st.delete_permanently(&id))?; let _ = app.emit("conversations-changed", ()); Ok(()) }
 
+
+// ---------------------------------------------------------------- attachments
+const STAGED_MAX_BYTES: usize = 300 << 20;
+#[derive(Serialize)] pub struct Analysis { token: String, name: String, size: usize, kind: veyra_docs::Kind, mime: String, summary: String, notes: Vec<String>, chars: usize, truncated: bool, image: Option<(usize, usize)>, entries: Vec<veyra_docs::Entry>, readable_by_model: bool }
+/// The file arrives as the raw request body (no JSON/base64 inflation); its name is in the `x-name` header (URL-encoded). Analysed in memory, kept in memory until sent or discarded.
+#[tauri::command] pub async fn attach_stage(ai: A<'_>, request: tauri::ipc::Request<'_>) -> Result<Analysis, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("expected a binary body".into()) };
+    let name = request.headers().get("x-name").and_then(|v| v.to_str().ok()).map(|v| pct_decode(v)).unwrap_or_else(|| "file".into());
+    let bytes = bytes.clone(); let a = ai.inner().clone();
+    if lk(&a.staged).values().map(|x| x.bytes.len()).sum::<usize>() + bytes.len() > STAGED_MAX_BYTES { return Err("Too many files are waiting to be sent; send or remove some first.".into()); }
+    let size = bytes.len();
+    let r = spawn_blocking(move || { let ex = veyra_docs::analyze(&name, &bytes, &veyra_docs::Limits::default())?; Ok::<_, String>((name, bytes, ex)) }).await.map_err(s)??;
+    let (name, bytes, ex) = r; let token = format!("{:016x}{:08x}", hash(&name) ^ (now_s() as u64), bytes.len());
+    let token = format!("{token}{:08x}", lk(&a.staged).len() as u32 ^ (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0)));
+    let an = Analysis { token: token.clone(), name: name.clone(), size, kind: ex.kind, mime: ex.mime.clone(), summary: ex.summary.clone(), notes: ex.notes.clone(), chars: ex.text.chars().count(), truncated: ex.truncated, image: ex.image, entries: ex.entries.clone(), readable_by_model: !ex.text.is_empty() };
+    lk(&a.staged).insert(token, Staged { name, mime: ex.mime.clone(), bytes, ex }); Ok(an)
+}
+fn pct_decode(s: &str) -> String { let b = s.as_bytes(); let mut o = Vec::with_capacity(b.len()); let mut i = 0; while i < b.len() { if b[i] == b'%' && i + 2 < b.len() { if let Some(Ok(v)) = s.get(i + 1..i + 3).map(|h| u8::from_str_radix(h, 16)) { o.push(v); i += 3; continue; } } o.push(b[i]); i += 1; } String::from_utf8_lossy(&o).into_owned() }
+#[tauri::command] pub async fn attach_discard(ai: A<'_>, token: String) -> Result<(), String> { lk(&ai.staged).remove(&token); Ok(()) }
+#[tauri::command] pub async fn conv_attachments(ai: A<'_>, id: String) -> Result<Vec<AttachmentRow>, String> { ai.with_store(|st| st.attachment_rows(&id)) }
+/// Original bytes of a stored attachment (decrypted, integrity-checked) for the preview. Returned as a binary response.
+#[tauri::command] pub async fn attachment_data(ai: A<'_>, id: String) -> Result<tauri::ipc::Response, String> { ai.with_store(|st| st.read_attachment(&id)).map(tauri::ipc::Response::new) }
+/// Same, for a file that has been staged but not sent yet (preview before sending).
+#[tauri::command] pub async fn staged_data(ai: A<'_>, token: String) -> Result<tauri::ipc::Response, String> { lk(&ai.staged).get(&token).map(|x| tauri::ipc::Response::new(x.bytes.clone())).ok_or_else(|| "file no longer available".into()) }
+
+/// Text that precedes a user message in the prompt: what was extracted from each attached file, bounded so one big file cannot evict the question.
+fn attachment_block(items: &[&(String, String, String, String)], cap_chars: usize) -> String {
+    if items.is_empty() { return String::new(); } let per = (cap_chars / items.len()).max(400); let mut out = String::new();
+    for (_, name, kind, text) in items {
+        if kind == "image" { out += &format!("[The user attached an image named \"{name}\". You cannot see images, so you do not know what it shows; say so if asked about it.]\n\n"); continue; }
+        if text.trim().is_empty() { out += &format!("[The user attached \"{name}\" but no text could be extracted from it.]\n\n"); continue; }
+        let t: String = text.chars().take(per).collect(); let cut = text.chars().count() > per;
+        out += &format!("[Attached file: {name}]\n{t}{}\n[End of attached file]\n\n", if cut { "\n[… the rest of the file was left out to fit the model's context window]" } else { "" });
+    }
+    out
+}
+
 // ---------------------------------------------------------------- chat
 #[derive(Serialize)] pub struct Sent { conversation: Conversation, user_message: Message, assistant_message: Message }
 #[derive(Serialize, Clone)] struct Token { conversation: String, message: String, delta: String }
@@ -251,8 +327,8 @@ const SYSTEM_PROMPT: &str = "You are Veyra, a private assistant running entirely
 fn hash(s: &str) -> u64 { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); s.hash(&mut h); h.finish() }
 
 /// Sends a user message and starts generating the reply in the background. Returns immediately with the stored messages; text arrives as events.
-#[tauri::command] pub async fn chat_send(app: AppHandle, ai: A<'_>, conversation: Option<String>, text: String) -> Result<Sent, String> {
-    let text = text.trim().to_string(); if text.is_empty() { return Err("empty message".into()); }
+#[tauri::command] pub async fn chat_send(app: AppHandle, ai: A<'_>, conversation: Option<String>, text: String, attachments: Option<Vec<String>>) -> Result<Sent, String> {
+    let text = text.trim().to_string(); let tokens = attachments.unwrap_or_default(); if text.is_empty() && tokens.is_empty() { return Err("empty message".into()); }
     if ai.loading.load(Ordering::Relaxed) { return Err("The model is still loading. It will be ready in a moment.".into()); }
     if lk(&ai.loaded).is_none() { return Err("No model is loaded. Open the application → Artificial intelligence to download and load one.".into()); }
     let cancel = Arc::new(AtomicBool::new(false));
@@ -260,7 +336,11 @@ fn hash(s: &str) -> u64 { use std::hash::{Hash, Hasher}; let mut h = std::collec
     let prep = ai.with_store(|st| {
         let conv = match &conversation { Some(id) => st.conversation(id)?, None => st.create_conversation("New conversation", now_s())? };
         let first = st.messages(&conv.id)?.is_empty(); let um = st.add_message(&conv.id, "user", &text, "sent", now_s())?;
-        if first { let t: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(48).collect(); st.rename(&conv.id, &t)?; }
+        let mut first_name = None;
+        for t in &tokens { let Some(sg) = lk(&ai.staged).remove(t) else { continue };
+            let meta = AttachmentMeta { kind: format!("{:?}", sg.ex.kind).to_lowercase(), summary: sg.ex.summary.clone(), notes_json: serde_json::to_string(&sg.ex.notes).unwrap_or_else(|_| "[]".into()), extracted: sg.ex.text.clone(), width: sg.ex.image.map(|i| i.0 as i64), height: sg.ex.image.map(|i| i.1 as i64) };
+            let info = st.add_attachment_full(&conv.id, &sg.name, &sg.mime, &sg.bytes, &meta, now_s())?; st.link_attachment(&info.id, &um.id)?; first_name.get_or_insert(sg.name); }
+        if first { let base = if text.is_empty() { first_name.unwrap_or_default() } else { text.clone() }; let t: String = base.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(48).collect(); st.rename(&conv.id, &t)?; }
         let am = st.add_message(&conv.id, "assistant", "", "pending", now_s())?; Ok((st.conversation(&conv.id)?, um, am))
     });
     let (conv, um, am) = match prep { Ok(x) => x, Err(e) => { *lk(&ai.gen_cancel) = None; return Err(e); } };
@@ -277,8 +357,12 @@ fn hash(s: &str) -> u64 { use std::hash::{Hash, Hasher}; let mut h = std::collec
 fn generate(app: &AppHandle, a: &Arc<Ai>, cid: &str, mid: &str, thinking: bool, cancel: &Arc<AtomicBool>) -> Result<(), String> {
     let mut g = lk(&a.engine); let eng = g.as_mut().ok_or("The model was unloaded.")?;
     let all: Vec<Message> = a.with_store(|st| st.messages(cid))?; let ai_set = crate::settings(app).ai;
-    let history: Vec<Msg> = all.iter().filter(|m| m.id != mid && !(m.role == "assistant" && m.status == "error" && m.content.is_empty())).map(|m| Msg { role: m.role.clone(), content: m.content.clone() }).collect();
     let ctx = eng.n_ctx() as usize; let reply = (ai_set.max_reply_tokens as usize).min(ctx / 3); let budget = ctx.saturating_sub(reply + 64);
+    let atts = a.with_store(|st| st.attachment_texts(cid))?; let last_user = all.iter().rev().find(|m| m.role == "user" && m.id != mid).map(|m| m.id.clone());
+    let history: Vec<Msg> = all.iter().filter(|m| m.id != mid && !(m.role == "assistant" && m.status == "error" && m.content.is_empty())).map(|m| {
+        let mine: Vec<_> = atts.iter().filter(|x| x.0 == m.id).collect(); // the newest question may use up to ~half the window (3 chars ≈ 1 token); older ones only a short excerpt
+        let cap = if Some(&m.id) == last_user.as_ref() { budget / 2 * 3 } else { 1500 * mine.len().max(1) };
+        Msg { role: m.role.clone(), content: format!("{}{}", attachment_block(&mine, cap), m.content) } }).collect();
     // exact token counts from the loaded model's own tokenizer, cached by content
     let mut counts: HashMap<String, usize> = HashMap::new();
     let stored = a.with_store(|st| Ok(st.conversation(cid)?.summary))?; let (covers, summary_text) = context::decode_summary(stored.as_deref());

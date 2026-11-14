@@ -108,3 +108,28 @@ fn setup(name: &str) -> (PathBuf, Store, String) {
     backup::prune(&bdir, now, 30, 10, 1).unwrap();
     assert_eq!(fs::read_dir(&bdir).unwrap().count(), 1, "size limit trims to the newest only, never to zero (had {left})");
 }
+
+#[test] fn attachments_are_linked_to_messages_and_keep_their_extracted_text() {
+    use veyra_store::db::AttachmentMeta;
+    let (d, s, _) = setup("att"); let c = s.create_conversation("t", 1).unwrap(); let m = s.add_message(&c.id, "user", "see file", "sent", 2).unwrap();
+    let meta = AttachmentMeta { kind: "csv".into(), summary: "2 rows".into(), notes_json: "[]".into(), extracted: "a,b\n1,2".into(), width: None, height: None };
+    let a = s.add_attachment_full(&c.id, "t.csv", "text/csv", b"a,b\n1,2", &meta, 3).unwrap(); s.link_attachment(&a.id, &m.id).unwrap();
+    let rows = s.attachment_rows(&c.id).unwrap(); assert_eq!(rows.len(), 1); assert_eq!(rows[0].message_id.as_deref(), Some(m.id.as_str())); assert_eq!(rows[0].kind, "csv");
+    assert_eq!(s.attachment_texts(&c.id).unwrap()[0].3, "a,b\n1,2"); assert_eq!(s.read_attachment(&a.id).unwrap(), b"a,b\n1,2");
+    // on disk the file is encrypted, not the plain bytes
+    let raw = fs::read(veyra_store::db::Store::attachments_dir(&d).join(format!("{}.bin", a.id))).unwrap(); assert!(!raw.windows(3).any(|w| w == b"a,b"));
+    s.delete_permanently(&c.id).unwrap(); assert!(!veyra_store::db::Store::attachments_dir(&d).join(format!("{}.bin", a.id)).exists());
+}
+
+#[test] fn backup_without_any_password_restores_with_the_system_key_and_only_with_that_key() {
+    use veyra_store::system_key::{self, FileKeyStore, KeyStore};
+    let d = tmp("nopw"); let ks = FileKeyStore { path: d.join("keys").join("k") }; let (u, _) = system_key::open_or_create(&ks).unwrap();
+    let sd = d.join("store"); let s = Store::open(&sd, &u).unwrap(); let c = s.create_conversation("kept", 1).unwrap(); s.add_message(&c.id, "user", "hello", "sent", 2).unwrap();
+    let bdir = d.join("backups"); fs::create_dir_all(&bdir).unwrap(); let b = backup::create(&s, &sd, &bdir, 5).unwrap(); assert!(!b.join("vault.json").exists(), "no password file in a backup");
+    let t = d.join("restored"); backup::restore_with_key(&b, &t, &u).unwrap(); assert_eq!(Store::open(&t, &u).unwrap().messages(&c.id).unwrap().len(), 1);
+    // another computer has another random key: the backup is unreadable there until the exported key is imported
+    let other = FileKeyStore { path: d.join("other").join("k") }; let (u2, _) = system_key::open_or_create(&other).unwrap(); let t2 = d.join("restored2");
+    assert!(backup::restore_with_key(&b, &t2, &u2).is_err() && !t2.exists());
+    let bundle = system_key::export_key(&u, "a long passphrase!", KdfParams::TEST).unwrap(); let imported = system_key::import_key(&bundle, "a long passphrase!").unwrap();
+    assert!(system_key::import_key(&bundle, "wrong passphrase!!").is_err()); backup::restore_with_key(&b, &t2, &imported).unwrap(); let _ = ks.kind();
+}

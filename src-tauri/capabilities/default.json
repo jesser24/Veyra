@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "UI windows may call Veyra's own audited commands, listen to events and start a native window drag. Nothing else; no network, no file system.",
-  "windows": ["toggle", "panel"],
+  "windows": ["toggle", "panel", "app"],
   "permissions": ["core:default", "core:window:allow-start-dragging"]
 }

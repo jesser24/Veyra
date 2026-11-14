@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p veyra-core -p veyra-store -p veyra-net -p veyra-ai -p veyra-llama --locked
+      - run: cargo test -p veyra-core -p veyra-store -p veyra-net -p veyra-ai -p veyra-llama -p veyra-docs --locked
 
   engine-cross-os:
     name: Net + AI engine tests (${{ matrix.os }})
@@ -60,7 +60,7 @@ jobs:
         shell: bash
         run: echo "VEYRA_LLAMA_DIR=${GITHUB_WORKSPACE}/libllama" >> "$GITHUB_ENV"
       # the native binding (libllama linked statically), the gateway and the resumable download behave differently per OS: test on each
-      - run: cargo test -p veyra-net -p veyra-ai -p veyra-llama --locked
+      - run: cargo test -p veyra-net -p veyra-ai -p veyra-llama -p veyra-docs --locked
 
   libllama:
     name: libllama b12336, static (${{ matrix.label }})

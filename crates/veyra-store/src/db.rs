@@ -12,6 +12,10 @@ pub struct Message { pub id: String, pub conversation_id: String, pub role: Stri
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct AttachmentInfo { pub id: String, pub conversation_id: String, pub name: String, pub mime: String, pub size: i64, pub sha256: String }
 #[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AttachmentMeta { pub kind: String, pub summary: String, pub notes_json: String, pub extracted: String, pub width: Option<i64>, pub height: Option<i64> }
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AttachmentRow { pub id: String, pub message_id: Option<String>, pub name: String, pub mime: String, pub size: i64, pub kind: String, pub summary: String, pub notes: String, pub width: Option<i64>, pub height: Option<i64> }
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Folder { pub id: String, pub name: String }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +24,7 @@ pub enum View { Active, Favorites, Archived, Trash }
 pub struct Store { conn: Connection, dir: PathBuf, file_key: Key, db_key_hex: String }
 
 fn new_id() -> String { crypto::hex(&crypto::random::<16>()) }
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 impl Store {
     pub fn db_path(dir: &Path) -> PathBuf { dir.join("veyra.db") }
@@ -53,6 +57,18 @@ impl Store {
                 CREATE TABLE attachments(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                     name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, created INTEGER NOT NULL);
                 PRAGMA user_version = 1;")?;
+        }
+        if v < 2 { // attachments belong to a message and carry what was extracted from them (all inside the encrypted database)
+            self.conn.execute_batch("
+                ALTER TABLE attachments ADD COLUMN message_id TEXT;
+                ALTER TABLE attachments ADD COLUMN kind TEXT NOT NULL DEFAULT 'text';
+                ALTER TABLE attachments ADD COLUMN summary TEXT NOT NULL DEFAULT '';
+                ALTER TABLE attachments ADD COLUMN notes TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE attachments ADD COLUMN extracted TEXT NOT NULL DEFAULT '';
+                ALTER TABLE attachments ADD COLUMN width INTEGER;
+                ALTER TABLE attachments ADD COLUMN height INTEGER;
+                CREATE INDEX attachments_msg ON attachments(message_id);
+                PRAGMA user_version = 2;")?;
         }
         Ok(())
     }
@@ -147,6 +163,20 @@ impl Store {
         let sha = crypto::sha256_hex(bytes);
         self.conn.execute("INSERT INTO attachments(id,conversation_id,name,mime,size,sha256,created) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![id, conv, name, mime, bytes.len() as i64, sha, now])?;
         Ok(AttachmentInfo { id, conversation_id: conv.into(), name: name.into(), mime: mime.into(), size: bytes.len() as i64, sha256: sha })
+    }
+    pub fn add_attachment_full(&self, conv: &str, name: &str, mime: &str, bytes: &[u8], meta: &AttachmentMeta, now: i64) -> Result<AttachmentInfo> {
+        let info = self.add_attachment(conv, name, mime, bytes, now)?;
+        self.conn.execute("UPDATE attachments SET kind=?2, summary=?3, notes=?4, extracted=?5, width=?6, height=?7 WHERE id=?1", params![info.id, meta.kind, meta.summary, meta.notes_json, meta.extracted, meta.width, meta.height])?; Ok(info)
+    }
+    pub fn link_attachment(&self, id: &str, message: &str) -> Result<()> { self.conn.execute("UPDATE attachments SET message_id=?2 WHERE id=?1", params![id, message])?; Ok(()) }
+    pub fn attachment_rows(&self, conv: &str) -> Result<Vec<AttachmentRow>> {
+        let mut st = self.conn.prepare("SELECT id,message_id,name,mime,size,kind,summary,notes,width,height FROM attachments WHERE conversation_id=?1 ORDER BY created")?;
+        let v = st.query_map([conv], |r| Ok(AttachmentRow { id: r.get(0)?, message_id: r.get(1)?, name: r.get(2)?, mime: r.get(3)?, size: r.get(4)?, kind: r.get(5)?, summary: r.get(6)?, notes: r.get(7)?, width: r.get(8)?, height: r.get(9)? }))?.collect::<std::result::Result<Vec<_>, _>>()?; Ok(v)
+    }
+    /// (message_id, name, kind, extracted text) for every attachment of a conversation, to be placed in front of the matching message when the prompt is built.
+    pub fn attachment_texts(&self, conv: &str) -> Result<Vec<(String, String, String, String)>> {
+        let mut st = self.conn.prepare("SELECT message_id,name,kind,extracted FROM attachments WHERE conversation_id=?1 AND message_id IS NOT NULL ORDER BY created")?;
+        let v = st.query_map([conv], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<std::result::Result<Vec<_>, _>>()?; Ok(v)
     }
     pub fn attachments(&self, conv: &str) -> Result<Vec<AttachmentInfo>> {
         let mut st = self.conn.prepare("SELECT id,conversation_id,name,mime,size,sha256 FROM attachments WHERE conversation_id=?1 ORDER BY created")?;

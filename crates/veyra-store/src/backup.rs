@@ -15,21 +15,22 @@ fn collect(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// `data_dir` holds `vault.json`, `veyra.db` and `attachments/`. Returns the new backup folder.
+/// `data_dir` holds `veyra.db` and `attachments/` (and, only for data written by early development builds, a legacy `vault.json`). Returns the new backup folder.
+/// The data key is NOT in a backup: it lives in the operating system's credential store (see `system_key`); a backup is useless without it.
 pub fn create(store: &Store, data_dir: &Path, backups_dir: &Path, now: i64) -> Result<PathBuf> {
     let dest = backups_dir.join(format!("veyra-backup-{now}"));
     if dest.exists() { return Err(Error::Format("a backup with this timestamp already exists".into())); }
     let tmp = backups_dir.join(format!(".tmp-{now}"));
     fs::create_dir_all(tmp.join("attachments"))?;
-    fs::copy(data_dir.join("vault.json"), tmp.join("vault.json"))?;
+    let legacy = data_dir.join("vault.json").is_file(); if legacy { fs::copy(data_dir.join("vault.json"), tmp.join("vault.json"))?; }
     store.snapshot_to(&tmp.join("veyra.db"))?;
     let mut rels = vec![]; collect(&Store::attachments_dir(data_dir), data_dir, &mut rels)?;
     for r in &rels { fs::copy(data_dir.join(r), tmp.join(r))?; }
     let mut files = vec![];
-    for r in ["vault.json".into(), "veyra.db".into()].into_iter().chain(rels.iter().map(|p: &PathBuf| p.to_string_lossy().replace('\\', "/"))) {
+    for r in legacy.then(|| "vault.json".to_string()).into_iter().chain(["veyra.db".to_string()]).chain(std::iter::empty()).chain(rels.iter().map(|p: &PathBuf| p.to_string_lossy().replace('\\', "/"))) {
         let b = fs::read(tmp.join(&r))?; files.push((r, sha256_hex(&b), b.len() as u64));
     }
-    fs::write(tmp.join("MANIFEST.json"), serde_json::to_vec_pretty(&Manifest { version: 1, created: now, files }).unwrap())?;
+    fs::write(tmp.join("MANIFEST.json"), serde_json::to_vec_pretty(&Manifest { version: 2, created: now, files }).unwrap())?;
     fs::rename(&tmp, &dest)?;
     Ok(dest)
 }
@@ -47,14 +48,18 @@ pub fn verify(backup: &Path) -> Result<()> {
 /// Restore into an EMPTY `target_dir` (never overwrites existing data). Proves the secret works and the database opens and passes its
 /// integrity check before reporting success; on any failure the target is cleaned up.
 pub fn restore(backup: &Path, target_dir: &Path, password: Option<&str>, recovery: Option<&str>) -> Result<()> {
+    let u = match (password, recovery) { (Some(p), _) => vault::unlock(&backup.join("vault.json"), p)?, (None, Some(r)) => vault::unlock_with_recovery(&backup.join("vault.json"), r)?, _ => return Err(Error::WrongSecret) };
+    restore_with_key(backup, target_dir, &u)
+}
+/// Same guarantees as `restore`, with the data key supplied by the caller (the OS-protected key of this computer, or one imported from a key export).
+pub fn restore_with_key(backup: &Path, target_dir: &Path, u: &crate::vault::Unlocked) -> Result<()> {
     verify(backup)?;
     if target_dir.exists() && fs::read_dir(target_dir)?.next().is_some() { return Err(Error::Format("restore target is not empty; refusing to overwrite existing data".into())); }
-    let u = match (password, recovery) { (Some(p), _) => vault::unlock(&backup.join("vault.json"), p)?, (None, Some(r)) => vault::unlock_with_recovery(&backup.join("vault.json"), r)?, _ => return Err(Error::WrongSecret) };
     fs::create_dir_all(target_dir)?;
     let res = (|| -> Result<()> {
         let mut rels = vec![]; collect(backup, backup, &mut rels)?;
         for r in rels { if r.to_string_lossy() == "MANIFEST.json" { continue; } let to = target_dir.join(&r); if let Some(d) = to.parent() { fs::create_dir_all(d)?; } fs::copy(backup.join(&r), to)?; }
-        Store::open(target_dir, &u)?.integrity_check()
+        Store::open(target_dir, u)?.integrity_check()
     })();
     if res.is_err() { let _ = fs::remove_dir_all(target_dir); }
     res

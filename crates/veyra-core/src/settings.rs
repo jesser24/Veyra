@@ -77,6 +77,31 @@ impl AiSettings {
     }
 }
 
+/// Look-and-feel shared by the chat window and the application. Every field is applied by the front-end (CSS variables / behaviour); none is decorative.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct UiSettings {
+    /// Text scale, 0.85–1.3.
+    pub text_size: f64,
+    /// "comfortable" | "compact".
+    pub density: String,
+    /// Opacity of the window surfaces, 0.88–1.0 (never see-through enough to hurt legibility).
+    pub surface_opacity: f64,
+    /// Accent colour for both windows; `None` = same as the toggle's.
+    pub accent: Option<String>,
+    /// Enter sends (Shift+Enter = new line) when true; Ctrl/Cmd+Enter sends when false.
+    pub enter_sends: bool,
+}
+impl Default for UiSettings { fn default() -> Self { Self { text_size: 1.0, density: "comfortable".into(), surface_opacity: 0.97, accent: None, enter_sends: true } } }
+impl UiSettings {
+    pub fn clamped(mut self) -> Self {
+        self.text_size = if self.text_size.is_finite() { self.text_size.clamp(0.85, 1.3) } else { 1.0 };
+        self.surface_opacity = if self.surface_opacity.is_finite() { self.surface_opacity.clamp(0.88, 1.0) } else { 0.97 };
+        if !matches!(self.density.as_str(), "comfortable" | "compact") { self.density = "comfortable".into(); }
+        if let Some(a) = &self.accent { let ok = a.len() == 7 && a.starts_with('#') && a[1..].chars().all(|c| c.is_ascii_hexdigit()); if !ok { self.accent = None; } } self
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -84,11 +109,12 @@ pub struct Settings {
     pub panel_width: f64, pub panel_height: f64, pub panel_always_on_top: bool,
     pub autostart: bool, // opt-in, off by default
     pub ai: AiSettings,
+    pub ui: UiSettings,
     /// Set once the first-run installation step has been completed (see docs/SECURITY.md: it is NOT a security boundary).
     pub setup_done: bool,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { theme: Theme::System, toggle: ToggleSettings::default(), placement: None, panel_width: 420.0, panel_height: 620.0, panel_always_on_top: false, autostart: false, ai: AiSettings::default(), setup_done: false } }
+    fn default() -> Self { Self { theme: Theme::System, toggle: ToggleSettings::default(), placement: None, panel_width: 420.0, panel_height: 620.0, panel_always_on_top: false, autostart: false, ai: AiSettings::default(), ui: UiSettings::default(), setup_done: false } }
 }
 impl Settings {
     pub fn clamped(mut self) -> Self {
@@ -96,7 +122,7 @@ impl Settings {
         let f = |v: f64, lo: f64, hi: f64, d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
         self.panel_width = f(self.panel_width, 320.0, 1400.0, 420.0);
         self.panel_height = f(self.panel_height, 360.0, 1200.0, 620.0);
-        self.ai = self.ai.clamped();
+        self.ai = self.ai.clamped(); self.ui = self.ui.clamped();
         self
     }
     /// Missing or corrupt file -> defaults. A corrupt file is renamed to `<name>.corrupt` instead of being silently overwritten.
@@ -129,6 +155,7 @@ mod tests {
         let t = ToggleSettings { thickness: 9999.0, opacity: 0.0, margin: -4.0, accent: "red".into(), ..Default::default() }.clamped();
         assert_eq!((t.thickness, t.opacity, t.margin), (20.0, 0.15, 0.0)); assert_eq!(t.accent, "#6f7de0");
     }
+    #[test] fn ui_settings_are_clamped() { let u = UiSettings { text_size: 9.0, surface_opacity: 0.1, density: "x".into(), accent: Some("blue".into()), enter_sends: true }.clamped(); assert_eq!((u.text_size, u.surface_opacity), (1.3, 0.88)); assert_eq!(u.density, "comfortable"); assert!(u.accent.is_none()); }
     #[test] fn roundtrip_and_old_files_without_new_keys() {
         let d = dir(); let p = d.join("settings.json");
         let mut s = Settings::default(); s.toggle.length = 90.0; s.save(&p).unwrap();

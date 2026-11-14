@@ -1,0 +1,1 @@
+fn main() { for p in std::env::args().skip(1) { let b = std::fs::read(&p).unwrap(); match veyra_docs::analyze(&p, &b, &Default::default()) { Ok(e) => println!("{p}: {:?} | {} | {:?}\n{}\n", e.kind, e.summary, e.notes, e.text.chars().take(300).collect::<String>()), Err(e) => println!("{p}: ERROR {e}") } } }
