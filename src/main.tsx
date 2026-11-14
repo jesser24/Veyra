@@ -1,9 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Toggle } from "./Toggle";
-import { Panel } from "./Panel";
-import "./styles.css";
+import { ChatWindow } from "./chat/ChatWindow";
+import { AppWindow } from "./app/AppWindow";
+import "./styles/tokens.css"; import "./styles/components.css"; import "./styles/chat.css"; import "./styles/app.css"; import "./styles/toggle.css";
 
-const which = new URLSearchParams(location.search).get("w");
-document.documentElement.dataset.window = which ?? "panel";
-createRoot(document.getElementById("root")!).render(<StrictMode>{which === "toggle" ? <Toggle /> : <Panel />}</StrictMode>);
+const which = new URLSearchParams(location.search).get("w") ?? "panel";
+document.documentElement.dataset.window = which;
+createRoot(document.getElementById("root")!).render(<StrictMode>{which === "toggle" ? <Toggle /> : which === "app" ? <AppWindow /> : <ChatWindow />}</StrictMode>);

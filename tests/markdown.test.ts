@@ -23,4 +23,18 @@ describe("markdown", () => {
   it("never produces HTML: markup in model output stays text", () => {
     const b = parseBlocks("<script>alert(1)</script> and <img src=x onerror=1>"); expect(b).toEqual([{ t: "p", c: [{ t: "text", v: "<script>alert(1)</script> and <img src=x onerror=1>" }] }]);
   });
+  it("parses GFM tables with alignment, inline formatting in cells and short rows", () => {
+    const b = parseBlocks("Before\n\n| Name | Qty | Note |\n|:--|--:|:-:|\n| **ax** | 2 | `ok` |\n| bee | 4 |\n\nAfter");
+    expect(b.map((x) => x.t)).toEqual(["p", "table", "p"]);
+    const t = b[1] as Extract<(typeof b)[number], { t: "table" }>;
+    expect(t.align).toEqual(["left", "right", "center"]); expect(t.rows).toHaveLength(2); expect(t.rows[0][0][0].t).toBe("b"); expect(t.rows[1]).toHaveLength(3);
+  });
+  it("does not turn a lone pipe line or a streaming half-table into a table", () => {
+    expect(parseBlocks("a | b").map((x) => x.t)).toEqual(["p"]);
+    expect(parseBlocks("| a | b |").map((x) => x.t)).toEqual(["p"]);
+  });
+  it("supports escaped pipes in cells and horizontal rules", () => {
+    const t = parseBlocks("| a |\n|---|\n| x \\| y |")[0] as { rows: Array<Array<Array<{ t: string; v?: string }>>> };
+    expect(t.rows[0][0][0].v).toBe("x | y"); expect(parseBlocks("one\n\n---\n\ntwo").map((x) => x.t)).toEqual(["p", "hr", "p"]);
+  });
 });

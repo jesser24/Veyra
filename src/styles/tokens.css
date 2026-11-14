@@ -1,0 +1,43 @@
+/* Design tokens shared by the chat window and the application. Quiet, warm-neutral surfaces; one accent; thin borders; soft shadows. */
+:root {
+  --accent: #6f7de0; --scale: 1; --surface-a: 0.97;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  --r-s: 8px; --r-m: 12px; --r-l: 18px;
+  --ease: cubic-bezier(.2, .7, .2, 1); --t-fast: 120ms; --t: 220ms;
+  --pad: 16px; --gap: 12px;
+  color-scheme: light;
+  --bg: #fbfbfa; --surface: #ffffff; --sunken: #f3f3f1; --hover: rgba(24, 26, 40, .055); --press: rgba(24, 26, 40, .09);
+  --border: rgba(24, 26, 40, .10); --border-strong: rgba(24, 26, 40, .18);
+  --text: #17181d; --text-2: #5b5e6a; --text-3: #8a8d99; --on-accent: #fff;
+  --accent-soft: color-mix(in srgb, var(--accent) 11%, transparent); --accent-line: color-mix(in srgb, var(--accent) 38%, transparent);
+  --ok: #2f8f5b; --warn: #b7791f; --danger: #c2413b; --ok-bg: rgba(47, 143, 91, .1); --warn-bg: rgba(183, 121, 31, .11); --danger-bg: rgba(194, 65, 59, .1);
+  --shadow-s: 0 1px 2px rgba(20, 22, 40, .06); --shadow-m: 0 8px 28px rgba(20, 22, 40, .14), 0 1px 3px rgba(20, 22, 40, .08);
+  --scrim: rgba(18, 20, 32, .32);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #151619; --surface: #1d1e22; --sunken: #121316; --hover: rgba(255, 255, 255, .06); --press: rgba(255, 255, 255, .1);
+  --border: rgba(255, 255, 255, .09); --border-strong: rgba(255, 255, 255, .18);
+  --text: #ececf0; --text-2: #a0a2ae; --text-3: #6f7280;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent); --accent-line: color-mix(in srgb, var(--accent) 50%, transparent);
+  --ok: #55c08a; --warn: #e0a84a; --danger: #ee7b73; --ok-bg: rgba(85, 192, 138, .12); --warn-bg: rgba(224, 168, 74, .12); --danger-bg: rgba(238, 123, 115, .12);
+  --shadow-s: 0 1px 2px rgba(0, 0, 0, .3); --shadow-m: 0 10px 32px rgba(0, 0, 0, .5), 0 1px 3px rgba(0, 0, 0, .4); --scrim: rgba(0, 0, 0, .5);
+}
+:root[data-density="compact"] { --pad: 12px; --gap: 8px; }
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+html { font-size: calc(14px * var(--scale)); }
+body { font-family: var(--font); color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; overflow: hidden; }
+:root[data-window="panel"] body, :root[data-window="toggle"] body { background: transparent; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--accent-line); }
+code, pre { font-family: var(--mono); }
+.grow { flex: 1 1 auto; }
+:root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { transition: none !important; animation: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
+/* scrollbars: thin, quiet */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; } ::-webkit-scrollbar-track { background: transparent; }

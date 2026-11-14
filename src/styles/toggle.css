@@ -1,0 +1,18 @@
+/* toggle: the window is the hit area, the .tab is what is drawn, flush against the docked edge */
+.toggle { position: fixed; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; background: transparent; cursor: pointer; display: flex; align-items: center; }
+.toggle.at-left { justify-content: flex-start; } .toggle.at-right { justify-content: flex-end; }
+.toggle.at-top { align-items: flex-start; justify-content: center; } .toggle.at-bottom { align-items: flex-end; justify-content: center; }
+.toggle.at-free { justify-content: center; }
+.tab { display: flex; align-items: center; justify-content: center; gap: 3px; box-sizing: border-box; opacity: var(--op); border-radius: var(--radius);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 55%, white) 0%, color-mix(in srgb, var(--accent) 85%, transparent) 45%, color-mix(in srgb, var(--accent) 60%, #05061a) 100%);
+  border: 1px solid rgba(255,255,255,.38); position: relative; overflow: hidden; transition: width .18s cubic-bezier(.2,.9,.25,1.05), height .18s cubic-bezier(.2,.9,.25,1.05), opacity .18s; }
+.toggle.v .tab { width: var(--thick); height: calc(100% - 8px); flex-direction: column; } .toggle.h .tab { height: var(--thick); width: calc(100% - 8px); flex-direction: row; }
+.toggle.at-free .tab { height: calc(var(--thick) + 8px); width: calc(100% - 8px); flex-direction: row; }
+.tab.shadow { box-shadow: 0 2px 12px rgba(8,10,40,.45); }
+.tab.reflect::after { content: ""; position: absolute; inset: 0; background: linear-gradient(120deg, rgba(255,255,255,.35), rgba(255,255,255,0) 55%); pointer-events: none; }
+.tab i { display: block; width: 2px; height: 2px; border-radius: 50%; background: rgba(255,255,255,.75); }
+.toggle:hover .tab, .toggle:focus-visible .tab { opacity: 1; }
+.toggle.v:hover .tab { width: calc(var(--thick) + 4px); } .toggle.h:hover .tab { height: calc(var(--thick) + 4px); }
+.toggle:active .tab { filter: brightness(.9); }
+.toggle:focus-visible { outline: none; } .toggle:focus-visible .tab { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--accent); }
+
