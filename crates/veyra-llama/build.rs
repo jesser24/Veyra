@@ -32,5 +32,9 @@ fn main() {
     if target_os == "macos" {
         for f in ["Accelerate", "Foundation", "Metal", "MetalKit"] { println!("cargo:rustc-link-lib=framework={f}"); }
         println!("cargo:rustc-link-lib=c++");
+        // Objective-C `@available(...)` checks in ggml-metal call __isPlatformVersionAtLeast, which lives in the compiler runtime, not in libSystem.
+        if let Ok(o) = std::process::Command::new("clang").arg("--print-resource-dir").output() { let dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let d = std::path::Path::new(&dir).join("lib").join("darwin"); if d.join("libclang_rt.osx.a").exists() { println!("cargo:rustc-link-search=native={}", d.display()); println!("cargo:rustc-link-lib=static=clang_rt.osx"); } }
+    } else if target_os == "windows" { println!("cargo:rustc-link-lib=advapi32"); // ggml-cpu reads the CPU name from the registry
     } else if target_os == "linux" { println!("cargo:rustc-link-lib=dl"); println!("cargo:rustc-link-lib=pthread"); println!("cargo:rustc-link-lib=stdc++"); }
 }
